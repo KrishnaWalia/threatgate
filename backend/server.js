@@ -1,0 +1,64 @@
+require('dotenv').config();
+const express = require('express');
+const cors = require('cors');
+const http = require('http');
+const { Server } = require('socket.io');
+
+const pool = require('./db/pool');
+const authRoutes = require('./routes/auth');
+const dashboardRoutes = require('./routes/dashboard');
+const { attachSocket } = require('./socket');
+const { startSimulator } = require('./mock/simulator');
+
+const app = express();
+const server = http.createServer(app);
+
+const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN || 'http://localhost:5173';
+
+app.use(cors({ origin: CLIENT_ORIGIN, credentials: true }));
+app.use(express.json());
+
+app.get('/api/health', (req, res) => res.json({ ok: true, service: 'threatgate-track-c' }));
+
+app.use('/api/auth', authRoutes);
+app.use('/api/dashboard', dashboardRoutes);
+
+// Central error handler — anything a route forgot to catch lands
+// here instead of leaking a stack trace to the client.
+app.use((err, req, res, next) => {
+  console.error('Unhandled error:', err);
+  res.status(500).json({ error: 'Internal server error' });
+});
+
+const io = new Server(server, {
+  cors: { origin: CLIENT_ORIGIN, credentials: true },
+});
+attachSocket(io);
+
+const PORT = process.env.PORT || 4000;
+
+async function start() {
+  // Fail fast and loud if MySQL isn't reachable, instead of the
+  // server "starting" and every route silently 500ing.
+  try {
+    await pool.query('SELECT 1');
+    console.log('[db] MySQL connection OK');
+  } catch (err) {
+    console.error('[db] Could not connect to MySQL:', err.message);
+    console.error('Check backend/.env DB_* values and that MySQL is running, then re-run schema/schema.sql.');
+    process.exit(1);
+  }
+
+  server.listen(PORT, () => {
+    console.log(`[server] ThreatGate Track C listening on http://localhost:${PORT}`);
+  });
+
+  if (process.env.DEMO_MODE === 'true') {
+    // Demo mode fakes org_id=1 (the seed script's Demo Org) so a
+    // freshly-seeded database "just works" for a presentation
+    // without any extra config.
+    startSimulator(io, 1);
+  }
+}
+
+start();
