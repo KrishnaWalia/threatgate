@@ -4,11 +4,11 @@ const cors = require('cors');
 const http = require('http');
 const { Server } = require('socket.io');
 
-const pool = require('./db/pool');
 const authRoutes = require('./routes/auth');
 const dashboardRoutes = require('./routes/dashboard');
 const { attachSocket } = require('./socket');
-const { startSimulator } = require('./mock/simulator');
+
+const USE_DB = process.env.USE_DB === 'true';
 
 const app = express();
 const server = http.createServer(app);
@@ -38,25 +38,36 @@ attachSocket(io);
 const PORT = process.env.PORT || 4000;
 
 async function start() {
-  // Fail fast and loud if MySQL isn't reachable, instead of the
-  // server "starting" and every route silently 500ing.
-  try {
-    await pool.query('SELECT 1');
-    console.log('[db] MySQL connection OK');
-  } catch (err) {
-    console.error('[db] Could not connect to MySQL:', err.message);
-    console.error('Check backend/.env DB_* values and that MySQL is running, then re-run schema/schema.sql.');
-    process.exit(1);
+  if (USE_DB) {
+    // Fail fast and loud if MySQL isn't reachable, instead of the
+    // server "starting" and every route silently 500ing.
+    try {
+      const pool = require('./db/pool');
+      await pool.query('SELECT 1');
+      console.log('[db] MySQL connection OK');
+    } catch (err) {
+      console.error('[db] Could not connect to MySQL:', err.message);
+      console.error('Check backend/.env DB_* values and that MySQL is running, then re-run schema/schema.sql.');
+      process.exit(1);
+    }
+  } else {
+    console.log('[db] USE_DB=false — skipping MySQL entirely. Auth runs on the in-memory user store.');
+    console.log('[db] Dashboard routes (/api/dashboard/*) will return 503 until USE_DB=true.');
   }
 
   server.listen(PORT, () => {
     console.log(`[server] ThreatGate Track C listening on http://localhost:${PORT}`);
   });
 
-  if (process.env.DEMO_MODE === 'true') {
+  // The demo simulator writes to attack_logs, so it only makes
+  // sense — and is only require()'d — once a real database is
+  // wired up. It's independent of DEMO_MODE=true so USE_DB=false
+  // deployments never touch MySQL at all, even accidentally.
+  if (USE_DB && process.env.DEMO_MODE === 'true') {
     // Demo mode fakes org_id=1 (the seed script's Demo Org) so a
     // freshly-seeded database "just works" for a presentation
     // without any extra config.
+    const { startSimulator } = require('./mock/simulator');
     startSimulator(io, 1);
   }
 }

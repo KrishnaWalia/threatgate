@@ -12,20 +12,24 @@ when the other two tracks are wired in.
 
 ```
 threatgate-track-c/
+├── package.json         # root convenience scripts (run both apps at once)
+├── run.sh               # bash alternative to the root package.json
 ├── schema/
 │   ├── schema.sql       # shared MySQL contract — orgs, users, rules, attack_logs, blocked_ips
 │   └── seed.js          # creates a demo org + admin/viewer login + sample rules
 ├── backend/             # Express API + Socket.io gateway (the Track C server)
 │   ├── server.js
 │   ├── db/pool.js
+│   ├── store/userStore.js      # in-memory OR MySQL user store, picked by USE_DB
 │   ├── middleware/auth.js     # JWT verification + role check
 │   ├── routes/auth.js         # register / login / me
-│   ├── routes/dashboard.js    # logs, stats, blocked-ips (admin-gated)
+│   ├── routes/dashboard.js    # logs, stats, blocked-ips (admin-gated, needs USE_DB=true)
 │   ├── socket.js               # Socket.io auth + emit helpers
-│   ├── mock/simulator.js       # DEMO-ONLY fake traffic generator
+│   ├── mock/simulator.js       # DEMO-ONLY fake traffic generator (needs USE_DB=true)
 │   └── .env.example
 └── frontend/             # React (Vite) dashboard
     └── src/
+        ├── pages/Landing.jsx      # public landing page at "/"
         ├── pages/Login.jsx
         ├── pages/Dashboard.jsx
         ├── pages/BlockedIps.jsx   # admin-only
@@ -34,36 +38,49 @@ threatgate-track-c/
         └── api/                   # http.js (axios + interceptors), socket.js
 ```
 
-## Quick start (local demo, no other tracks needed)
+## Run everything at once
 
-**Prerequisites:** Node 18+, a running MySQL server.
-
-### 1. Create the database
+Instead of starting the backend and frontend in two terminals, use
+the root scripts (they just wrap the two `npm run dev`s):
 
 ```bash
-mysql -u root -p < schema/schema.sql
+npm install           # installs concurrently at the root, once
+npm run install:all    # installs backend/ and frontend/ deps, once
+cp backend/.env.example backend/.env   # edit JWT_SECRET at least
+npm run dev             # starts backend (:4000) + frontend (:5173) together
 ```
 
-### 2. Configure and start the backend
+Output from both is interleaved in one terminal, prefixed
+`[backend]` / `[frontend]`. `Ctrl+C` stops both.
+
+Prefer not to add a root `package.json` layer? `run.sh` does the
+same thing with plain bash — no root `npm install` needed, just the
+two `backend`/`frontend` installs:
+
+```bash
+chmod +x run.sh   # first time only
+./run.sh
+```
+
+Either way this starts Stage 1 (no database, in-memory auth) by
+default — see below for turning the database on.
+
+## Quick start — Stage 1: landing page + login, no database
+
+This is the mode `.env.example` ships with (`USE_DB=false`). No
+MySQL server needed at all — auth runs on an in-memory user store
+seeded with the demo admin/viewer accounts, so you can build and
+present the landing page + login system before the database exists.
+
+**Prerequisites:** Node 18+. That's it.
 
 ```bash
 cd backend
 cp .env.example .env
-# edit .env: set DB_USER / DB_PASSWORD / JWT_SECRET
+# edit .env: set JWT_SECRET to any long random string
 npm install
-npm run seed      # creates Demo Org + admin/viewer logins + sample rules
-npm run dev        # starts on http://localhost:4000, DEMO_MODE=true by default
+npm run dev        # http://localhost:4000, logs "USE_DB=false — using in-memory users"
 ```
-
-Seed output prints the demo logins:
-- **Admin:** `admin@threatgate.dev` / `Admin123!`
-- **Viewer:** `viewer@threatgate.dev` / `Viewer123!`
-
-With `DEMO_MODE=true` (the default in `.env.example`), the backend
-inserts a fake attack log every ~2.5s and pushes it over Socket.io,
-so the dashboard is alive immediately without waiting on Track A/B.
-
-### 3. Start the frontend
 
 ```bash
 cd frontend
@@ -71,9 +88,59 @@ npm install
 npm run dev        # http://localhost:5173
 ```
 
-Log in with either demo account. Only the admin account sees
-"Blocked IPs" in the sidebar and can hit that route at all — a
-viewer gets a 403 from the API even if they type the URL directly.
+Visit `http://localhost:5173` → landing page → **Sign in** → login
+form. Demo logins (printed by the backend on startup too):
+- **Admin:** `admin@threatgate.dev` / `Admin123!`
+- **Viewer:** `viewer@threatgate.dev` / `Viewer123!`
+
+Login, token issuance/verification, and role info all work fully
+in this mode. Once logged in you'll land on `/dashboard`, which
+will show a "Dashboard data requires a database connection" notice
+(a 503 from `/api/dashboard/*`) — expected, since there's no
+`attack_logs`/`blocked_ips` data yet. That's Stage 2.
+
+## Quick start — Stage 2: turn the database on
+
+When you're ready to wire up MySQL (for the full presentation, or
+once Track A/B are ready to integrate):
+
+### 1. Create the database
+
+```bash
+mysql -u root -p < schema/schema.sql
+```
+
+### 2. Flip the flag and configure DB credentials
+
+In `backend/.env`, set:
+
+```
+USE_DB=true
+DB_HOST=localhost
+DB_USER=root
+DB_PASSWORD=your_password
+DB_NAME=threatgate
+```
+
+### 3. Seed and restart
+
+```bash
+cd backend
+npm run seed      # creates Demo Org + admin/viewer logins + sample rules in MySQL
+npm run dev        # now connects to MySQL and (with DEMO_MODE=true) starts the demo simulator
+```
+
+Nothing changes on the frontend or in how you log in — `userStore`
+(see `backend/store/userStore.js`) transparently switches from the
+in-memory array to real MySQL queries based on `USE_DB`, and the
+dashboard routes go from 503 to actually returning data. With
+`DEMO_MODE=true`, the backend also starts inserting a fake attack
+log every ~2.5s and pushing it over Socket.io, so the live feed and
+charts are populated immediately without waiting on Track A/B.
+
+Only the admin account sees "Blocked IPs" in the sidebar and can
+hit that route at all — a viewer gets a 403 from the API even if
+they type the URL directly.
 
 ## How auth actually works here
 

@@ -1,13 +1,34 @@
 const express = require('express');
-const pool = require('../db/pool');
 const { requireAuth, requireRole } = require('../middleware/auth');
 
 const router = express.Router();
+const USE_DB = process.env.USE_DB === 'true';
 
 // Every route below runs requireAuth first, and every query is
 // scoped by req.user.orgId — this is what stops org A's viewer
 // from ever seeing org B's traffic, regardless of role.
 router.use(requireAuth);
+
+/**
+ * These routes all read attack_logs / blocked_ips, which don't
+ * exist until MySQL is wired up (USE_DB=true in .env). Rather than
+ * let `require('../db/pool')` crash the process at startup with no
+ * DB present, we only load the pool lazily and return a clear 503
+ * here instead — so the landing page, login, and auth flow work
+ * completely on their own before the database is ready.
+ */
+router.use((req, res, next) => {
+  if (!USE_DB) {
+    return res.status(503).json({
+      error: 'Dashboard data requires a database connection. Set USE_DB=true in backend/.env once MySQL is set up (see schema/schema.sql).',
+    });
+  }
+  next();
+});
+
+function getPool() {
+  return require('../db/pool');
+}
 
 /**
  * GET /api/dashboard/logs?limit=50
@@ -18,7 +39,7 @@ router.use(requireAuth);
 router.get('/logs', async (req, res) => {
   const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
   try {
-    const [rows] = await pool.query(
+    const [rows] = await getPool().query(
       `SELECT id, ip_address, method, path, category, risk_score, action, created_at
        FROM attack_logs
        WHERE org_id = ?
@@ -41,7 +62,7 @@ router.get('/logs', async (req, res) => {
  */
 router.get('/stats', async (req, res) => {
   try {
-    const [[totals]] = await pool.query(
+    const [[totals]] = await getPool().query(
       `SELECT
          COUNT(*) AS totalRequests,
          SUM(action = 'blocked') AS totalBlocked,
@@ -50,7 +71,7 @@ router.get('/stats', async (req, res) => {
       [req.user.orgId]
     );
 
-    const [byCategory] = await pool.query(
+    const [byCategory] = await getPool().query(
       `SELECT category, COUNT(*) AS count
        FROM attack_logs
        WHERE org_id = ? AND created_at >= NOW() - INTERVAL 24 HOUR
@@ -58,7 +79,7 @@ router.get('/stats', async (req, res) => {
       [req.user.orgId]
     );
 
-    const [timeline] = await pool.query(
+    const [timeline] = await getPool().query(
       `SELECT DATE_FORMAT(created_at, '%H:%i') AS bucket,
               SUM(action = 'blocked') AS blocked,
               SUM(action = 'allowed') AS allowed
@@ -69,7 +90,7 @@ router.get('/stats', async (req, res) => {
       [req.user.orgId]
     );
 
-    const [[activeBlocks]] = await pool.query(
+    const [[activeBlocks]] = await getPool().query(
       `SELECT COUNT(*) AS count FROM blocked_ips
        WHERE org_id = ? AND (expires_at IS NULL OR expires_at > NOW())`,
       [req.user.orgId]
@@ -98,7 +119,7 @@ router.get('/stats', async (req, res) => {
  */
 router.get('/blocked-ips', requireRole('admin'), async (req, res) => {
   try {
-    const [rows] = await pool.query(
+    const [rows] = await getPool().query(
       `SELECT id, ip_address, reason, blocked_at, expires_at
        FROM blocked_ips
        WHERE org_id = ?
@@ -121,7 +142,7 @@ router.get('/blocked-ips', requireRole('admin'), async (req, res) => {
  */
 router.delete('/blocked-ips/:id', requireRole('admin'), async (req, res) => {
   try {
-    const [result] = await pool.query(
+    const [result] = await getPool().query(
       'DELETE FROM blocked_ips WHERE id = ? AND org_id = ?',
       [req.params.id, req.user.orgId]
     );
