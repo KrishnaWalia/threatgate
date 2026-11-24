@@ -7,5 +7,8 @@ dist/
 backend/bin/
 backend/db.properties
 backend/lib/*.jar
+backend/data/*_data.csv
+backend/data/*_backup.csv
+backend/data/*.bin
 backend/data/test_*
 *.tmp
