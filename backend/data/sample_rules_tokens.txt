@@ -1,0 +1,3 @@
+RULE sqli 75 "\\bexec(?:ute)?\\s*\\(" "Stored procedure execution probe"
+RULE xss 65 "<\\s*svg\\b[^>]*\\bonload\\s*=" "SVG onload XSS payload"
+RULE path_traversal 70 "\\.\\.%2f" "Encoded directory climb signature"
