@@ -1,163 +1,223 @@
-# ThreatGate — Reverse-Proxy Web Application Firewall
+# ThreatGate — Java CLI Web Application Firewall
 
-ThreatGate sits in front of a website, inspects every request, and blocks **SQL injection, XSS, path traversal and brute-force** attacks in real time — with a live dashboard that updates the instant something happens.
+ThreatGate inspects HTTP requests against a **rules-as-data detection engine**, detects and blocks **SQL injection, XSS, path traversal, and brute-force attacks**, aggregates live traffic analytics with **Java Streams**, coordinates simulated/batch traffic using **multithreaded producer-consumer pipelines**, and persists state via **MySQL JDBC** with automatic **CSV/file fallback** — built as a pure Java CLI backend aligned 1-for-1 with the ThreatGate React `frontend/` and `schema/schema.sql`.
 
+```text
++---------------------------------------------------------------------------------------------------+
+|                             ThreatGate Java CLI Backend (com.threatgate)                          |
+|                                                                                                   |
+|   Main CLI Console (app/Main.java)                                                                |
+|    |-- Auth Gate & RBAC (AuthService: admin / viewer, PasswordUtil SHA-256 + salt)                |
+|    |-- Dashboard Overview & Live Feed (DashboardService & AttackLogService via Stream API)        |
+|    '-- Interactive Request Tester & Attack Demo                                                   |
+|           |                                                                                       |
+|           v                                                                                       |
+|   TrafficPipelineService                                                                          |
+|    |-- RequestBuffer<InspectionRequest>  (synchronized monitor: wait() / notifyAll())             |
+|    |-- TrafficProducerWorker (Runnable) ---> TrafficConsumerWorker (Thread)                       |
+|    |-- ExpirySweeperWorker (Daemon Thread, MIN_PRIORITY -> TIMED_WAITING -> purgeExpired())       |
+|    '-- WAF Lifecycle: Active IP Block? -> Rate Limit? -> DetectionEngine -> Log & Track Strikes   |
+|           |                                             |                                         |
+|           v                                             v                                         |
+|   MySQL JDBC Layer (db/)                       Offline / File I/O Layer (service/)                |
+|    |-- DatabaseConnection (DriverManager)       |-- CSV Import/Export (BufferedReader/Writer)     |
+|    |-- SchemaInitializer (Statement DDL)        |-- Binary Audit Snapshot (FileInput/OutputStream)|
+|    '-- User/Rule/AttackLog/BlockedIp JDBC DAOs  '-- Tokenized Rule Import (StreamTokenizer)       |
++---------------------------------------------------------------------------------------------------+
+                                   |
+                                   v  Aligned Data Contract & Features
+                 schema/schema.sql  <--->  frontend/ (React + Vite UI, untouched)
 ```
-                         ┌────────────────────── ThreatGate backend (Node) ───────────────────────┐
-  attacker / user ──►    │  :8080  WAF PROXY (Track A)            :4000  DASHBOARD API (Track C)   │
-  http://localhost:8080  │   IP block? → rate limit? → inspect     JWT login · roles · REST        │
-                         │   → risk score → 403 or forward         Socket.io (per-org rooms)       │
-                         │            │                                     ▲                      │
-                         │            ▼   every decision                     │ 'attack:new'         │
-                         │     PIPELINE (Track B): store.insertLog() ───────┘                       │
-                         │     BRUTE-FORCE (Track B): sliding windows → auto-block with expiry      │
-                         └───────┬──────────────────────────────────────────────────▲──────────────┘
-                                 │ clean requests                                   │ websocket + REST
-                                 ▼                                                  │
-                      :3000 protected demo site                          :5173 React dashboard (Track C)
-```
 
-## Run it (3 commands)
+---
 
-Requires **Node 18+**. No database needed — everything runs in memory by default.
+## Quick Start (One Command via Bash)
+
+Requires **JDK 8+** (built and verified on **JDK 26.0.2**). No external framework or build tool is needed, and MySQL is optional (automatic CSV persistence runs whenever MySQL is unreachable).
+
+From the repository root:
 
 ```bash
-npm run setup      # installs root + backend + frontend dependencies (once)
-npm run dev        # starts demo site :3000, WAF :8080, API :4000, dashboard :5173
+./start-backend.sh
 ```
 
-Then:
+Or using `run.sh`:
 
-1. Open **http://localhost:5173** → *Sign in* → `admin@threatgate.dev` / `Admin123!`  (viewer: `viewer@threatgate.dev` / `Viewer123!`)
-2. In another terminal, fire attacks through the WAF: `npm run attack` — watch the dashboard fill **live**.
-3. Or attack by hand through the proxy (**:8080**, not :3000):
-   ```bash
-   curl "http://localhost:8080/search?q=hello"                            # 200 allowed
-   curl "http://localhost:8080/api/users?id=1' OR '1'='1"                 # 403 SQLi
-   curl "http://localhost:8080/search?q=<script>alert(1)</script>"        # 403 XSS
-   curl "http://localhost:8080/files?name=../../../etc/passwd"            # 403 path traversal
+```bash
+./run.sh
+```
+
+Run the automated verification suite (53 assertions across auth, detection rules, brute-force windows, Streams, generics, multithreading, file I/O, and JDBC):
+
+```bash
+./test-backend.sh
+```
+
+From inside `backend/`:
+
+```bash
+./start-cli.sh
+./test-cli.sh
+```
+
+### Demo Credentials (Matching `frontend/src/pages/Login.jsx`)
+
+| Role | Email | Password | Capabilities |
+| :--- | :--- | :--- | :--- |
+| **Admin** | `admin@threatgate.dev` | `Admin123!` | Full console: Dashboard, Live Feed, Inspect/Demo, toggle/re-weight/add/delete rules, manage/unblock Blocked IPs, Simulator, File I/O, JDBC settings |
+| **Viewer** | `viewer@threatgate.dev` | `Viewer123!` | Read-only analytics: Dashboard, Live Feed, Inspect/Demo, view Detection Rules (admin mutations enforce `UnauthorizedRoleException`) |
+
+---
+
+## Repository & Package Structure
+
+```text
+threatgate/
+├── start-backend.sh                              # Root launcher -> backend/start-cli.sh
+├── test-backend.sh                               # Root test runner -> backend/test-cli.sh
+├── run.sh                                        # One-command CLI backend startup
+├── schema/
+│   └── schema.sql                                # Shared MySQL contract (orgs, users, rules, attack_logs, blocked_ips)
+├── frontend/                                     # React + Vite + Tailwind UI (untouched)
+└── backend/
+    ├── src/com/threatgate/
+    │   ├── app/
+    │   │   └── Main.java                         # Interactive CLI console, ASCII charts & safe Scanner input
+    │   ├── model/
+    │   │   ├── Identifiable.java                 # Generic ID contract Identifiable<ID>
+    │   │   ├── DataRepository.java               # Generic CRUD interface DataRepository<T extends Identifiable<ID>, ID>
+    │   │   ├── GenericStore.java                 # Synchronized generic store with bounded wildcards & Stream helpers
+    │   │   ├── CsvCodec.java                     # RFC-4180 CSV escaping & quoted-field parser
+    │   │   ├── Organization.java                 # orgs entity model
+    │   │   ├── User.java                         # users entity model & CSV serialization
+    │   │   ├── DetectionRule.java                # rules entity model & CSV serialization
+    │   │   ├── AttackLog.java                    # attack_logs entity model & CSV serialization
+    │   │   ├── BlockedIp.java                    # blocked_ips entity model with lazy expiry check
+    │   │   ├── InspectionRequest.java            # Request payload + headers + simulated login status
+    │   │   ├── RuleMatch.java                    # Matched rule metadata & inspection target location
+    │   │   ├── InspectionResult.java             # Combined risk score, category, matched rule, block flag
+    │   │   ├── CategoryCount.java                # 24h category aggregation DTO
+    │   │   ├── TimelineBucket.java               # 1h per-minute allowed/blocked DTO
+    │   │   └── DashboardStats.java               # Dashboard overview totals, category counts & timeline
+    │   ├── exception/
+    │   │   ├── AuthenticationException.java      # Invalid credentials / auth errors
+    │   │   ├── UnauthorizedRoleException.java    # Service-layer RBAC enforcement (admin vs viewer)
+    │   │   ├── EntityNotFoundException.java      # Missing rule / blocked IP record
+    │   │   ├── InvalidDataException.java         # Validation errors, duplicate email, invalid regex
+    │   │   ├── DatabaseException.java            # JDBC connection & SQL error wrapper
+    │   │   └── IpBlockedException.java           # Active IP block metadata exception
+    │   ├── db/
+    │   │   ├── RowMapper.java                    # @FunctionalInterface ResultSet -> Java object mapper
+    │   │   ├── StatementBinder.java              # @FunctionalInterface PreparedStatement parameter binder
+    │   │   ├── JdbcTemplateHelper.java           # Reusable JDBC query execution & cursor iteration
+    │   │   ├── DatabaseConfig.java               # Loads/saves db.properties & WAF thresholds
+    │   │   ├── DatabaseConnection.java           # Class.forName + DriverManager connection management
+    │   │   ├── SchemaInitializer.java            # DDL schema creation & default seed via Statement/PreparedStatement
+    │   │   ├── UserJdbcDao.java                  # PreparedStatement CRUD for users table
+    │   │   ├── RuleJdbcDao.java                  # PreparedStatement CRUD for rules table
+    │   │   ├── AttackLogJdbcDao.java             # PreparedStatement CRUD & SQL counts for attack_logs
+    │   │   └── BlockedIpJdbcDao.java             # Upsert/query/delete/purge CRUD for blocked_ips
+    │   ├── service/
+    │   │   ├── PasswordUtil.java                 # Salted SHA-256 hashing & constant-time verification
+    │   │   ├── RequestValidator.java             # @FunctionalInterface request validation predicate
+    │   │   ├── RuleMatcher.java                  # @FunctionalInterface normalized rule matcher
+    │   │   ├── AuthService.java                  # Login, viewer registration, RBAC gate
+    │   │   ├── RuleService.java                  # 22 default rules-as-data + live admin updates
+    │   │   ├── DetectionEngine.java              # 3-round decoding normalization & risk scoring
+    │   │   ├── SlidingWindow.java                # Intrinsic-lock synchronized sliding event counter
+    │   │   ├── BruteForceService.java            # 3 sliding windows (login, rate, strikes) + lazy block expiry
+    │   │   ├── AttackLogService.java             # Logging + Stream filtering, pagination & distinct queries
+    │   │   ├── DashboardService.java             # Stream API 24h category breakdown & 1h timeline buckets
+    │   │   ├── RequestBuffer.java                # Bounded monitor using wait() / notifyAll()
+    │   │   ├── TrafficProducerWorker.java        # Runnable traffic generator / batch producer
+    │   │   ├── TrafficConsumerWorker.java        # Thread consumer executing WAF inspection pipeline
+    │   │   ├── ExpirySweeperWorker.java          # Daemon Thread (MIN_PRIORITY) purging expired blocks
+    │   │   ├── TrafficPipelineService.java       # Orchestration, demo batch, benchmark & 6-state trace
+    │   │   ├── FilePersistenceService.java       # CSV, FileInputStream/FileOutputStream & StreamTokenizer
+    │   │   └── ThreatGateFacade.java             # Unified facade selecting MySQL JDBC or CSV fallback
+    │   └── test/
+    │       └── ThreatGateTestRunner.java         # Automated 53-assertion verification suite
+    ├── data/
+    │   └── sample_rules_tokens.txt               # Sample StreamTokenizer rule import file
+    ├── lib/                                      # Place mysql-connector-j-*.jar here
+    ├── db.properties.example                     # Sample MySQL JDBC & WAF configuration
+    ├── start-cli.sh                              # Compiles src/ -> bin/ and starts Main CLI
+    ├── test-cli.sh                               # Compiles src/ -> bin/ and runs ThreatGateTestRunner
+    └── README.md                                 # Detailed backend reference
+```
+
+---
+
+## Syllabus Topic Implementation Mapping
+
+| Topic | How It Is Implemented |
+| :--- | :--- |
+| **Multithreading & Concurrency** | `TrafficProducerWorker` (`Runnable`), `TrafficConsumerWorker` (`Thread`), `ExpirySweeperWorker` (`Thread`), `start()`, `run()`, `sleep()`, `join()`, `interrupt()`, plus sequential vs. 4-thread concurrent benchmark in `TrafficPipelineService` |
+| **Thread Lifecycle & Scheduling** | Live snapshot and deterministic trace of all 6 `Thread.State` values (`NEW`, `RUNNABLE`, `BLOCKED`, `WAITING`, `TIMED_WAITING`, `TERMINATED`), daemon sweeper (`setDaemon(true)`), and priority levels (`MIN_PRIORITY`, `NORM_PRIORITY`, `MAX_PRIORITY`) |
+| **Synchronization & Intrinsic Locks** | `synchronized` methods and private `lock` monitors in `SlidingWindow`, `GenericStore`, `AttackLogService`, `BruteForceService`, `RuleService`, and `volatile` stop flags for cross-thread visibility |
+| **Inter-Thread Communication** | `RequestBuffer<T>` bounded monitor with guarded `while` blocks calling `wait()` and `notifyAll()` between producer and consumer threads |
+| **JDBC & Database Programming** | `Class.forName` driver loading, `DriverManager`, `Connection`, `Statement` DDL, `PreparedStatement` parameter binding, `ResultSet` cursor iteration, typed getters, `RowMapper`, and CRUD DAOs for `users`, `rules`, `attack_logs`, and `blocked_ips` |
+| **Lambda Expressions & Stream API** | Custom `@FunctionalInterface`s (`RowMapper`, `StatementBinder`, `RequestValidator`, `RuleMatcher`), method references (`::`), `Stream` pipelines with `filter()`, `map()`, `sorted()`, `distinct()`, `limit()`, `skip()`, `collect()`, `count()` |
+| **Generics** | `Identifiable<ID>`, `DataRepository<T extends Identifiable<ID>, ID>`, `GenericStore<T, ID>`, `RequestBuffer<T>`, `CsvImportResult<T>`, diamond operator `<>`, upper/lower bounded wildcards (`? extends`, `? super`) |
+| **File Handling & CSV Integration** | `FileReader`/`BufferedReader` and `FileWriter`/`BufferedWriter` for CSV import/export with malformed-row resilience, `FileInputStream`/`FileOutputStream` for binary audit snapshots and byte-by-byte backups, and `StreamTokenizer` for tokenized rule imports |
+
+---
+
+## Interactive CLI Features
+
+1. **Dashboard Overview**: Displays the 4 stat cards (`Total Requests`, `Blocked`, `Allowed`, `Active IP Blocks`), an ASCII 24h bar chart by attack category, and an hourly `HH:mm` allowed-vs-blocked timeline matching `frontend/src/pages/Dashboard.jsx`.
+2. **Live Request Feed**: View recent logs, filter & paginate with Streams (`category` / `action`), list distinct blocked IPs, or display top high-risk events.
+3. **Inspect Single HTTP Request**: Enter IP, HTTP method, path/query, body, `User-Agent`, `Referer`, `Cookie`, and optional login response status (`200`/`401`/`403`) to test the WAF pipeline interactively.
+4. **Automated Attack Demo**: Runs a multithreaded producer-consumer batch across benign queries (`O'Brien`, `/search?q=hello`), SQLi (`' OR '1'='1`, `UNION/**/SELECT`), XSS (`<script>alert(1)</script>`), double-encoded path traversal (`%252e%252e%252fetc/passwd`), login brute force, and repeated attack strikes.
+5. **Detection Rules**: View all 22 rules-as-data; Admins can toggle rules ON/OFF, re-weight (`1–100`), add custom regex rules, or delete custom rules live.
+6. **Blocked IPs Management *(Admin Only)***: View active blocks, manually block an IP (temporary or permanent), unblock an IP (resetting all sliding windows), or purge expired entries.
+7. **Multithreaded Simulator & Thread Monitor**: Start/stop continuous background producer-consumer simulation, inspect live threads and trace all 6 `Thread.State` transitions, or run the sequential-vs-concurrent benchmark.
+8. **File I/O Tools**: Export/import CSVs (`rules`, `attack_logs`, `blocked_ips`), generate/parse tokenized rules via `StreamTokenizer`, write/verify binary audit snapshots via `FileOutputStream`/`FileInputStream`, and copy CSV backups byte-by-byte.
+9. **Database / JDBC Settings**: Inspect JDBC driver/URL/status, test or configure MySQL credentials live, re-run `SchemaInitializer`, or save offline CSV state.
+
+---
+
+## Detection Rules & Brute-Force Mechanics
+
+- **3-Pass Normalization (`DetectionEngine.normalize`)**: Caps target length at 20,000 chars, converts `+` to space, runs up to 3 rounds of decoding (`%XX`, `%uXXXX`, `\uXXXX`, `&#xHEX;`, `&#DEC;`, named entities `&lt; &gt; &quot; &apos; &amp; &sol; &bsol;`), strips inline SQL comments (`/*...*/`), and collapses whitespace across `path`, `query`, `body`, `user-agent`, `referer`, and `cookie`.
+- **Risk Scoring Formula**:
+  ```text
+  risk = min(100, W_max + 0.5 * sum(weights of other distinct matched rules))
+  ```
+  Each rule counts at most once per request. Requests with `risk >= 50` (`BLOCK_THRESHOLD`) are blocked (`403`). Weak rules (weight `40`, e.g. `SELECT ... FROM` or `alert(`) do not block on their own so benign inputs like `O'Brien` or `select the best items from our store` remain allowed.
+- **Brute-Force Sliding Windows (`BruteForceService`)**:
+  - Failed Logins: `>= 5` (`401`/`403` on login paths) within `60s`
+  - Request Rate: `> 100` requests within `10s`
+  - Attack Strikes: `>= 8` blocked requests within `60s`
+  - **Lazy Expiry**: `findActiveBlock()` evaluates `expires_at` on every check and immediately evicts expired blocks; `ExpirySweeperWorker` also purges expired rows on a daemon timer. Unblocking resets all counters for that IP.
+
+---
+
+## MySQL JDBC Configuration
+
+1. Ensure MySQL Server 8.0 is running and `mysql-connector-j-26.10.0.jar` is present in `backend/lib/` (the startup scripts also check `D:/jdbc/mysql-connector-j-26.10.0/mysql-connector-j-26.10.0.jar` and `$MYSQL_JDBC_JAR`).
+2. Copy `backend/db.properties.example` to `backend/db.properties` and set your MySQL username/password (or configure interactively via CLI option `[3]` at sign-in or `[9]` inside the console):
+   ```properties
+   db.driver=com.mysql.cj.jdbc.Driver
+   db.url=jdbc:mysql://localhost:3306/threatgate?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
+   db.serverUrl=jdbc:mysql://localhost:3306/?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
+   db.name=threatgate
+   db.user=root
+   db.password=your_password
    ```
-   You can also browse the protected site at http://localhost:8080 and type attacks into its search box / login form.
+3. On startup, `SchemaInitializer` automatically creates the `threatgate` database and all 5 tables (`orgs`, `users`, `rules`, `attack_logs`, `blocked_ips`) if absent, and seeds `Demo Org`, `admin@threatgate.dev`, `viewer@threatgate.dev`, and all 22 default rules.
+4. If MySQL is unavailable or rejects credentials, ThreatGate switches cleanly to **Offline CSV Fallback Mode** in `backend/data/`.
 
-`./run.sh` does the same as `npm run dev` without the root `npm install`.
+---
 
-### Checks
+## Automated Verification (`ThreatGateTestRunner`)
 
-| Command | What it proves |
-|---|---|
-| `npm test` | 49 unit tests: every attack form is blocked, benign look-alikes (e.g. `O'Brien`) are allowed, scoring formula, sliding window, block expiry |
-| `npm run attack` | Integration: normal → allowed, SQLi/XSS/traversal → 403, brute-force → 401…401 then auto-block, repeated attacks → auto-block. Exits 1 if any expectation fails |
-| `npm run verify` | End-to-end across all tracks: JWT auth, socket auth, proxy→log→**Socket.io push**, REST stats, admin-vs-viewer 403s, unblock flow, toggling a rule live |
-
-(`attack` and `verify` need the stack running.)
-
-## What's where
-
-```
-backend/
-  server.js               wires everything: API (:4000) + WAF (:8080) share one pipeline + one Socket.io
-  waf/                    ── TRACK A (+B) ──
-    rules.js                the 22 detection rules, as data  (id, category, pattern, weight, description)
-    rulesStore.js           serves rules to the detector; admin can toggle/re-weight live
-    detector.js             normalise → match → risk score (formula documented at top of file)
-    proxy.js                the reverse proxy + request lifecycle (http-proxy-middleware)
-    bruteforce.js           ── TRACK B ── sliding windows, auto-block + expiry
-    pipeline.js             ── TRACK B ── log every decision, then emit over Socket.io
-    config.js               every threshold, from .env
-  store/logStore.js       attack_logs + blocked_ips (memory now, MySQL when USE_DB=true; same interface)
-  store/userStore.js      users (memory / MySQL)                                  ── TRACK C ──
-  middleware/auth.js      requireAuth (JWT verify) + requireRole                  ── TRACK C ──
-  routes/auth.js          register / login / me                                   ── TRACK C ──
-  routes/dashboard.js     logs, stats, blocked-ips, rules                         ── TRACK C ──
-  socket.js               socket JWT auth, per-org rooms, emit helpers
-  demo-target/server.js   the fake website being protected
-  test/ scripts/          unit tests, attack demo, e2e verification
-frontend/                 React + Vite + Tailwind + Recharts: Landing, Login, Dashboard, Detection Rules, Blocked IPs
-schema/schema.sql         the shared MySQL contract (orgs, users, rules, attack_logs, blocked_ips)
-```
-
-## Track A — how detection works (be ready to explain this)
-
-**Request lifecycle** (`waf/proxy.js`), cheap checks first so a flood never reaches the regex engine:
-`client IP → already blocked? (403) → rate limit? (429 + block) → read body (capped) → detector → risk ≥ 50? (403) → log → forward upstream`.
-
-**Normalisation** (`detector.normalize`) — attackers encode payloads, so we decode *before* matching: percent-encoding up to **3 rounds** (`%252e%252e%252f` is double-encoded `../`), `+`→space, `%uXXXX`, `\uXXXX`, HTML entities (`&#60;script`), then replace SQL comments with a space (`UNION/**/SELECT` → `UNION SELECT`) and collapse whitespace. Inspected: path, query string, body, `User-Agent`, `Referer`, `Cookie`.
-
-**Scoring formula** — each rule has a weight (1–100):
-
-```
-risk = min(100,  W_max + 0.5 × Σ(weights of the other distinct matched rules))
-```
-
-The strongest signal sets the floor (a `UNION SELECT` = 80 blocks alone); other, different rules corroborate at half weight (two weak 40-point signals → 40 + 20 = 60 → blocked); a rule counts once however often it matches, so repeating a payload can't inflate the score. **Blocked when risk ≥ `BLOCK_THRESHOLD` (50).**
-
-**The rules** (`waf/rules.js`) — each has a plain-English description; the key ones:
-
-| Category | Rules (weight) | Idea |
-|---|---|---|
-| SQLi | `UNION…SELECT` (80) · `' OR '1'='1` (75) · `OR 1=1` (70) · `'--` (60) · `; DROP TABLE` (85) · `SLEEP()/BENCHMARK()` (80) · `information_schema` (70) · `extractvalue/load_file` (75) · `SELECT…FROM` (40, weak) | Break out of a string or number, force TRUE, cut off the rest of the query, stack a second statement, or probe the schema |
-| XSS | `<script` (80) · `onerror=` etc. (65) · `javascript:` (70) · `<iframe/object/embed` (60) · `data:text/html` (60) · `document.cookie` (60) · `alert(`/`eval(` (40, weak) | Get script to run in a victim's browser |
-| Path traversal | `../` (55) · `../../` (80) · `/etc/passwd`, `win.ini` (85) · `/.env`, `/.git/` (70) · null byte (55) · `file://`, `php://` (60) | Climb out of the web root and read files |
-
-Weak rules (< 50) deliberately can't block alone — that is how `select the best items from our store` stays allowed (false-positive control).
-
-**Rules are data**: the detector contains no regex. Admins can switch rules on/off or re-weight them on the *Detection Rules* page and the next request is judged by the new set (`PATCH /api/dashboard/rules/:id`).
-
-## Track B — brute force, logging, real time
-
-**Pipeline** (`waf/pipeline.js`): every decision (allowed *and* blocked) is written with `store.insertLog()`, and only after the write succeeds the stored row is emitted as `attack:new` to the org's Socket.io room. The dashboard therefore never shows an event the log doesn't have.
-
-**Three counters**, all the same `SlidingWindow` (`waf/bruteforce.js`):
-
-| Counter | Default | Trips on |
-|---|---|---|
-| Failed logins | 5 / 60 s | a 401/403 *response* from a path matching `LOGIN_PATH_REGEX` |
-| Request rate | 100 / 10 s | any request (flood / scraping) |
-| Attack strikes | 8 / 60 s | requests the detector itself blocked |
-
-**Counting window:** per IP we keep the timestamps of its events. On each new event: drop timestamps older than `now − window`, push `now`, count = list length. It is a *sliding* window, so an attacker can't fire 5 attempts at 0:59 and 5 more at 1:01 — a fixed "reset every minute" counter would see 5 and 5, the sliding window sees 10. (Unit-tested.) A successful login clears that IP's failures.
-
-**Expiry:** a block is a record `{ip, blocked_at, expires_at = now + BLOCK_DURATION}` (default 5 min; `NULL` = permanent). Expiry is checked **lazily** — `findActiveBlock()` compares `expires_at` with the current time on every request from that IP — so correctness never depends on a timer firing. A 30-second sweep only frees memory. When a block is created the IP's counters reset, so when it expires it starts from zero instead of being instantly re-blocked by stale history. An admin can lift a block early from the dashboard.
-
-## Track C — auth & dashboard
-
-1. **Issue** (`POST /api/auth/login`): look up the user, `bcrypt.compare()` (re-hashes the candidate with the salt inside the stored hash — nothing is "decrypted"), same error for unknown-user and wrong-password. On success sign a JWT `{id, orgId, email, role}` with `JWT_SECRET`.
-2. **Verify** (`requireAuth`): parse `Authorization: Bearer …`, `jwt.verify` checks signature and expiry, and puts the payload in `req.user` — no DB lookup needed, the signature proves we issued it.
-3. **Role check** (`requireRole('admin')`): after `requireAuth`, is `req.user.role` in the allowed list? That's all. "Who are you?" and "may you do this?" are two separate middlewares. The hidden sidebar link is cosmetic; the 403 from the API is the real gate. The same JWT authenticates the Socket.io handshake and puts the socket in its org's room, so tenants never see each other's events; every query is also scoped by `req.user.orgId`.
-
-| | admin | viewer |
-|---|---|---|
-| Live feed, stats, charts, rules (read) | ✔ | ✔ |
-| Blocked IPs list / unblock | ✔ | 403 |
-| Toggle / re-weight rules | ✔ | 403 |
-
-## The shared schema (`schema/schema.sql`)
-
-`orgs` (tenant) · `users` (login + `role` enum) · `rules` (regex, weight, category, `is_active`) · `attack_logs` (one row per decision) · `blocked_ips` (`expires_at`, unique per org+ip). The in-memory stores use **exactly these column names**, so turning MySQL on changes nothing for the other tracks.
-
-### Turning MySQL on later (optional)
-
-```bash
-mysql -u root -p < schema/schema.sql
-# backend/.env:  USE_DB=true  + DB_HOST / DB_USER / DB_PASSWORD / DB_NAME
-cd backend && npm run seed     # org, admin/viewer users, all 22 rules
-```
-Note: the MySQL code paths follow the schema but were **not exercised in the build environment** (no MySQL there) — treat them as untested until you run them once.
-
-## Configuration
-
-Everything is in `backend/.env` (see `.env.example` for comments): ports, `BLOCK_THRESHOLD`, brute-force limits/windows, `BLOCK_DURATION_MS`, `TARGET_URL` (point it at your own app to protect it), `USE_DB`.
-
-**Security notes**
-- `TRUST_XFF=true` makes the WAF believe the `X-Forwarded-For` header so the demo can pretend to be many IPs. **In real use set it to `false`** (or anyone can spoof their IP and dodge blocks).
-- The shipped `.env` contains a random dev `JWT_SECRET`; generate your own for anything real.
-- The in-memory demo users and `/api/auth/register` are for the demo; public registration always creates a `viewer`.
-- This is a teaching-grade regex WAF: it stops common payload patterns, not a determined attacker with novel encodings.
-
-## Troubleshooting
-
-- **Port in use** → change `PORT` / `WAF_PORT` in `backend/.env` (and `TARGET_PORT` for the demo site).
-- **Login works but dashboard says it can't reach the API** → backend not running; use `npm run dev` from the project root.
-- **`npm run attack` says it can't reach the WAF** → start the stack first.
-- **I got blocked testing by hand** → `TRUST_XFF=true` means your IP is `127.0.0.1`; unblock it on the *Blocked IPs* page, or wait 5 minutes, or restart (memory mode).
-- **bcrypt fails to install** → needs Node 18+ and either a prebuilt binary or build tools (`python3`, `make`, `g++`).
+Run `./test-backend.sh` to execute all **53 assertions** covering:
+- Admin/Viewer login, anti-enumeration error handling, viewer registration, and RBAC denial (`UnauthorizedRoleException`)
+- All 22 compiled regex rules, false-positive safety (`O'Brien`, single weak signal), double-encoded path traversal, inline SQL comment bypass, HTML-encoded XSS, null-byte traversal, and `User-Agent` inspection
+- Rules-as-data live toggle, re-weighting, custom rule addition, and invalid regex rejection
+- `SlidingWindow` eviction, failed-login auto-block, successful-login reset, attack-strike block, short-TTL lazy expiry, and admin unblock reset
+- Stream API analytics (`getStats`, `getPagedLogs`, `getDistinctBlockedIps`, `getTopHighRiskLogs`)
+- `GenericStore<T, ID>` and bounded wildcards (`? super T`, `? extends Identifiable<?>`)
+- Multithreaded producer-consumer batch, 8-thread concurrent stress test (200/200 logs with zero loss), daemon `ExpirySweeperWorker`, and all 6 `Thread.State` transitions
+- CSV round-trip with malformed line skipping, `FileOutputStream`/`FileInputStream` binary audit snapshot & byte copy, `StreamTokenizer` parsing, JDBC driver loading, and offline restart reload
