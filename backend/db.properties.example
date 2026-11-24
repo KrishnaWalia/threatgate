@@ -1,0 +1,15 @@
+db.driver=com.mysql.cj.jdbc.Driver
+db.url=jdbc:mysql://localhost:3306/threatgate?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
+db.serverUrl=jdbc:mysql://localhost:3306/?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
+db.name=threatgate
+db.user=root
+db.password=
+waf.orgId=1
+waf.blockThreshold=50
+waf.loginFailMax=5
+waf.loginFailWindowMs=60000
+waf.rateLimitMax=100
+waf.rateLimitWindowMs=10000
+waf.attackStrikeMax=8
+waf.attackStrikeWindowMs=60000
+waf.blockDurationMs=300000
