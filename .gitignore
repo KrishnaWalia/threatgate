@@ -3,3 +3,9 @@ node_modules/
 dist/
 *.log
 .DS_Store
+*.class
+backend/bin/
+backend/db.properties
+backend/lib/*.jar
+backend/data/test_*
+*.tmp
