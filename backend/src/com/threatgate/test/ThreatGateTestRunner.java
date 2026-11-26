@@ -66,6 +66,7 @@ public final class ThreatGateTestRunner {
             runMultithreadingTests(facade);
             runFileIoTests(facade, testDataDir);
             runJdbcAndPersistenceReloadTests(facade, admin, testDataDir, isolatedConfigPath, examplePath);
+            runTryMode500Test(testDataDir, examplePath);
 
             System.out.printf("%n>>> ALL %d THREATGATE VERIFICATION ASSERTIONS PASSED SUCCESSFULLY! <<<%n", passCount);
         } finally {
@@ -488,6 +489,41 @@ public final class ThreatGateTestRunner {
         offlineReload.shutdown();
         assertCondition(!offlineReload.isDatabaseActive() && csvLogs.size() == 1,
                 "Test 9.6: Optional offline CSV fallback mode verified independently");
+    }
+
+    private static void runTryMode500Test(String testDataDir, String examplePath) throws Exception {
+        String tryDir = testDataDir + File.separator + "try_mode_500";
+        String tryCfg = tryDir + File.separator + "no_override.properties";
+        ThreatGateFacade tryFacade = new ThreatGateFacade(tryDir, tryCfg, examplePath, true, 0L);
+        try {
+            User admin = tryFacade.getAuthService().login(
+                    AuthService.DEFAULT_ADMIN_EMAIL,
+                    AuthService.DEFAULT_ADMIN_PASSWORD
+            );
+            TrafficPipelineService.TryModeReport report =
+                    tryFacade.runTryModeDemo(admin.getOrgId(), TrafficPipelineService.DEFAULT_TRY_MODE_REQUESTS);
+
+            assertCondition(report.getSubmittedCount() == 500 && report.getProcessedCount() == 500,
+                    "Test 10.1: Try Mode generated and processed all 500 presentation requests");
+            assertCondition(report.getAllowedCount() > 0 && report.getBlockedCount() > 0,
+                    "Test 10.2: Try Mode produced realistic allowed (" + report.getAllowedCount()
+                            + ") and blocked (" + report.getBlockedCount() + ") traffic");
+
+            Map<String, Long> cats = report.getCategoryBreakdown();
+            assertCondition(cats.containsKey("none")
+                            && cats.containsKey("sqli")
+                            && cats.containsKey("xss")
+                            && cats.containsKey("path_traversal")
+                            && cats.containsKey("brute_force"),
+                    "Test 10.3: Try Mode populated all 5 WAF categories (none, sqli, xss, path_traversal, brute_force)");
+
+            Map<String, Long> counts = tryFacade.getDatabaseTableCounts();
+            List<BlockedIp> blocks = tryFacade.extractActiveBlockedIps(admin);
+            assertCondition(counts.get("attack_logs") >= 500L && blocks.size() >= 2,
+                    "Test 10.4: Try Mode persisted >=500 attack_logs and >=2 auto-blocked IPs into H2 JDBC");
+        } finally {
+            tryFacade.shutdown();
+        }
     }
 
     private static String resolveBackendBaseDir() {

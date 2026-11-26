@@ -91,11 +91,13 @@ Or using root `run.sh`:
 ./run.sh
 ```
 
-Run the automated verification suite (57 assertions live on Embedded H2 JDBC):
+Run the automated verification suite (61 assertions live on Embedded H2 JDBC):
 
 ```bash
 ./test-backend.sh
 ```
+
+> **Try Mode (500 Requests):** Pick `[2] Try Mode` at the Sign-In prompt (or `[4]` inside the console) to populate 500 realistic requests directly into `backend/data/threatgate.mv.db` for live demos.
 
 From inside `backend/`:
 

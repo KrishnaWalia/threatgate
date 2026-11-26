@@ -15,6 +15,7 @@ import com.threatgate.model.InspectionRequest;
 import com.threatgate.model.Organization;
 import com.threatgate.model.TimelineBucket;
 import com.threatgate.model.User;
+import com.threatgate.service.AuthService;
 import com.threatgate.service.FilePersistenceService;
 import com.threatgate.service.ThreatGateFacade;
 import com.threatgate.service.TrafficPipelineService;
@@ -89,24 +90,45 @@ public final class Main {
         System.out.println("  Demo Credentials: admin@threatgate.dev / Admin123!  |  viewer@threatgate.dev / Viewer123!");
         System.out.println(LINE_THIN);
         System.out.println("  [1] Sign In");
-        System.out.println("  [2] Register New Viewer Account");
-        System.out.println("  [3] Configure Database (Local H2 DB File / Custom JDBC)");
-        System.out.println("  [4] Exit");
+        System.out.println("  [2] Try Mode - Launch with 500-Request Demo Dataset");
+        System.out.println("  [3] Register New Viewer Account");
+        System.out.println("  [4] Configure Database (Local H2 DB File / Custom JDBC)");
+        System.out.println("  [5] Exit");
         System.out.println(LINE_WIDE);
-        System.out.print("  Select an option [1-4]: ");
+        System.out.print("  Select an option [1-5]: ");
 
-        int choice = readMenuChoice(1, 4, 4);
+        int choice = readMenuChoice(1, 5, 5);
         System.out.println();
         switch (choice) {
             case 1 -> handleSignIn();
-            case 2 -> handleRegister();
-            case 3 -> handleDatabaseSwitchMenu();
-            case 4 -> {
+            case 2 -> handleQuickTryMode();
+            case 3 -> handleRegister();
+            case 4 -> handleDatabaseSwitchMenu();
+            case 5 -> {
                 return false;
             }
             default -> System.out.println("  [!] Invalid option.");
         }
         return true;
+    }
+
+    private void handleQuickTryMode() {
+        System.out.println(LINE_THIN);
+        System.out.println("                      TRY MODE - 500-REQUEST PRESENTATION DEMO");
+        System.out.println(LINE_THIN);
+        try {
+            currentUser = facade.getAuthService().login(
+                    AuthService.DEFAULT_ADMIN_EMAIL,
+                    AuthService.DEFAULT_ADMIN_PASSWORD
+            );
+            System.out.printf("  [TRY MODE] Signed in as %s [%s]%n",
+                    currentUser.getEmail(), currentUser.getRole().toUpperCase());
+            executeTryMode(TrafficPipelineService.DEFAULT_TRY_MODE_REQUESTS);
+            System.out.println("  Tip: Open [1] Dashboard Overview, [2] Live Feed, [6] Blocked IPs, or [9] DB Explorer.");
+        } catch (AuthenticationException | DatabaseException e) {
+            System.err.println("  [AUTH ERROR] Could not start Try Mode: " + e.getMessage());
+            currentUser = null;
+        }
     }
 
     private boolean runConsoleLoop() {
@@ -333,37 +355,88 @@ public final class Main {
 
     private void handleRunAttackDemo() {
         System.out.println(LINE_THIN);
-        System.out.println("                       RUN AUTOMATED ATTACK DEMO (PRODUCER-CONSUMER)");
+        System.out.println("                       TRY MODE & AUTOMATED ATTACK DEMOS");
         System.out.println(LINE_THIN);
-        System.out.println("  Dispatching benign, SQLi, XSS, double-encoded traversal, login brute-force,");
-        System.out.println("  and repeated attack-strike waves through the multithreaded WAF pipeline...");
-        try {
-            List<TrafficPipelineService.WafDecision> results =
-                    facade.getTrafficPipelineService().runAttackDemoBatch(currentUser.getOrgId());
-            long blockedCount = results.stream().filter(TrafficPipelineService.WafDecision::isBlocked).count();
-            long allowedCount = results.size() - blockedCount;
-            System.out.printf("%n  Processed %d requests: %d allowed, %d blocked.%n%n",
-                    results.size(), allowedCount, blockedCount);
-            System.out.println("  +----+-----------------+--------+------------------------------------------+-----------------+------+---------+");
-            System.out.println("  | #  | IP ADDRESS      | METHOD | PATH                                     | CATEGORY        | RISK | ACTION  |");
-            System.out.println("  +----+-----------------+--------+------------------------------------------+-----------------+------+---------+");
-            int idx = 1;
-            for (TrafficPipelineService.WafDecision d : results) {
-                AttackLog log = d.getLog();
-                System.out.printf("  | %-2d | %-15s | %-6s | %-40s | %-15s | %-4d | %-7s |%n",
-                        idx++,
-                        truncate(log.getIpAddress(), 15),
-                        truncate(log.getMethod(), 6),
-                        truncate(log.getPath(), 40),
-                        truncate(formatCategoryLabel(log.getCategory()), 15),
-                        log.getRiskScore(),
-                        log.getAction().toUpperCase());
+        System.out.println("  [1] Try Mode: Populate 500 Realistic Requests into DB (Presentation Mode)");
+        System.out.println("  [2] Quick Attack Showcase Batch (20 Requests)");
+        System.out.println("  [3] Custom Demo Dataset Size (50-1000 Requests)");
+        System.out.print("  Select option [1-3]: ");
+        int sub = readMenuChoice(1, 3, 1);
+
+        switch (sub) {
+            case 1 -> executeTryMode(TrafficPipelineService.DEFAULT_TRY_MODE_REQUESTS);
+            case 2 -> {
+                System.out.println("  Dispatching 20-request showcase batch through multithreaded WAF pipeline...");
+                try {
+                    List<TrafficPipelineService.WafDecision> results =
+                            facade.getTrafficPipelineService().runAttackDemoBatch(currentUser.getOrgId());
+                    long blockedCount = results.stream().filter(TrafficPipelineService.WafDecision::isBlocked).count();
+                    long allowedCount = results.size() - blockedCount;
+                    System.out.printf("%n  Processed %d requests: %d allowed, %d blocked.%n%n",
+                            results.size(), allowedCount, blockedCount);
+                    printDecisionSampleTable(results);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    System.err.println("  [INTERRUPTED] Attack demo interrupted.");
+                }
             }
-            System.out.println("  +----+-----------------+--------+------------------------------------------+-----------------+------+---------+");
+            case 3 -> {
+                int count = readInt("Number of requests to generate [50-1000]: ", 50, 1000);
+                executeTryMode(count);
+            }
+            default -> System.out.println("  [!] Unknown option.");
+        }
+    }
+
+    private void executeTryMode(int totalRequests) {
+        System.out.printf("  [TRY MODE] Generating and inspecting %d realistic requests via 4 consumer threads...%n",
+                totalRequests);
+        try {
+            TrafficPipelineService.TryModeReport report =
+                    facade.runTryModeDemo(currentUser.getOrgId(), totalRequests);
+            System.out.println("\n  +----------------------------------------------------------------------+");
+            System.out.printf("  | Submitted Requests : %-47d |%n", report.getSubmittedCount());
+            System.out.printf("  | Processed & Saved  : %-47d |%n", report.getProcessedCount());
+            System.out.printf("  | Allowed            : %-47d |%n", report.getAllowedCount());
+            System.out.printf("  | Blocked            : %-47d |%n", report.getBlockedCount());
+            System.out.printf("  | Elapsed Time       : %-44d ms |%n", report.getElapsedMs());
+            System.out.println("  +----------------------------------------------------------------------+");
+            System.out.println("\n  Category Breakdown (Persisted to DB):");
+            for (Map.Entry<String, Long> entry : report.getCategoryBreakdown().entrySet()) {
+                System.out.printf("    %-16s : %d%n",
+                        formatCategoryLabel(entry.getKey()), entry.getValue());
+            }
+            try {
+                printTableCountsSummary(facade.getDatabaseTableCounts());
+            } catch (DatabaseException ignored) {
+            }
+            if (!report.getSampleDecisions().isEmpty()) {
+                System.out.println("\n  Sample Request Decisions (First " + report.getSampleDecisions().size() + "):");
+                printDecisionSampleTable(report.getSampleDecisions());
+            }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            System.err.println("  [INTERRUPTED] Attack demo interrupted.");
+            System.err.println("  [INTERRUPTED] Try Mode generation interrupted.");
         }
+    }
+
+    private void printDecisionSampleTable(List<TrafficPipelineService.WafDecision> results) {
+        System.out.println("  +----+-----------------+--------+------------------------------------------+-----------------+------+---------+");
+        System.out.println("  | #  | IP ADDRESS      | METHOD | PATH                                     | CATEGORY        | RISK | ACTION  |");
+        System.out.println("  +----+-----------------+--------+------------------------------------------+-----------------+------+---------+");
+        int idx = 1;
+        for (TrafficPipelineService.WafDecision d : results) {
+            AttackLog log = d.getLog();
+            System.out.printf("  | %-2d | %-15s | %-6s | %-40s | %-15s | %-4d | %-7s |%n",
+                    idx++,
+                    truncate(log.getIpAddress(), 15),
+                    truncate(log.getMethod(), 6),
+                    truncate(log.getPath(), 40),
+                    truncate(formatCategoryLabel(log.getCategory()), 15),
+                    log.getRiskScore(),
+                    log.getAction().toUpperCase());
+        }
+        System.out.println("  +----+-----------------+--------+------------------------------------------+-----------------+------+---------+");
     }
 
     private void handleDetectionRules() {
@@ -769,7 +842,7 @@ public final class Main {
         System.out.println("  [1]  Dashboard Overview (Stat Cards, 24h Category Chart, 1h Timeline)");
         System.out.println("  [2]  Live Request Feed (Recent, Stream Filter/Pagination, High-Risk)");
         System.out.println("  [3]  Inspect Single HTTP Request (Interactive WAF Engine)");
-        System.out.println("  [4]  Run Automated Attack Demo (Multithreaded Pipeline)");
+        System.out.println("  [4]  Try Mode & Attack Demos (500-Request Demo / Quick Batch)");
         System.out.println("  [5]  Detection Rules (View & Admin Live Controls)");
         System.out.println("  [6]  Blocked IPs Management (Admin Only)");
         System.out.println("  [7]  Multithreaded Simulator, Thread Lifecycle & Benchmark");

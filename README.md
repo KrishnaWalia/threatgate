@@ -47,11 +47,13 @@ Or using `run.sh`:
 ./run.sh
 ```
 
-Run the automated verification suite (**57 assertions** running live against Embedded H2 JDBC):
+Run the automated verification suite (**61 assertions** running live against Embedded H2 JDBC):
 
 ```bash
 ./test-backend.sh
 ```
+
+> **Presentation Try Mode:** At the Sign-In screen (`./start-backend.sh`), pick **`[2]` Try Mode** to auto-sign in and populate **500 realistic requests** (benign, SQLi, XSS, path traversal, login brute-force, and attack-strike bans) straight into `backend/data/threatgate.mv.db`—or trigger it anytime from console menu **`[4]`**.
 
 From inside `backend/`:
 
@@ -170,7 +172,7 @@ threatgate/
 1. **Dashboard Overview**: Displays the 4 stat cards (`Total Requests`, `Blocked`, `Allowed`, `Active IP Blocks`), an ASCII 24h bar chart by attack category, and an hourly `HH:mm` allowed-vs-blocked timeline matching `frontend/src/pages/Dashboard.jsx`.
 2. **Live Request Feed**: View recent logs, filter & paginate with Streams (`category` / `action`), list distinct blocked IPs, or display top high-risk events.
 3. **Inspect Single HTTP Request**: Enter IP, HTTP method, path/query, body, `User-Agent`, `Referer`, `Cookie`, and optional login response status (`200`/`401`/`403`) to test and save directly to the database.
-4. **Automated Attack Demo**: Runs a multithreaded producer-consumer batch across benign queries (`O'Brien`, `/search?q=hello`), SQLi (`' OR '1'='1`, `UNION/**/SELECT`), XSS (`<script>alert(1)</script>`), double-encoded path traversal (`%252e%252e%252fetc/passwd`), login brute force, and repeated attack strikes — persisting every decision to `threatgate.mv.db`.
+4. **Try Mode & Automated Attack Demos**: From console menu `[4]` (or `[2]` at Sign-In), launch **Try Mode (500 requests)**, run the 20-request showcase batch, or generate a custom 50–1000 request demo dataset across benign queries (`O'Brien`, `/search?q=hello`), SQLi (`' OR '1'='1`, `UNION/**/SELECT`), XSS (`<script>alert(1)</script>`), double-encoded path traversal (`%252e%252e%252fetc/passwd`), login brute force, and repeated attack strikes — persisting every decision to `threatgate.mv.db`.
 5. **Detection Rules**: View all 22 rules-as-data; Admins can toggle rules ON/OFF, re-weight (`1–100`), add custom regex rules, or delete custom rules live in the database.
 6. **Blocked IPs Management *(Admin Only)***: View active blocks, manually block an IP (temporary or permanent), unblock an IP (resetting all sliding windows), or purge expired entries.
 7. **Multithreaded Simulator & Thread Monitor**: Start/stop continuous background producer-consumer simulation, inspect live threads and trace all 6 `Thread.State` transitions, or run the sequential-vs-concurrent benchmark.
@@ -184,7 +186,7 @@ threatgate/
 
 ## Automated Verification (`ThreatGateTestRunner`)
 
-Run `./test-backend.sh` to execute all **57 assertions** live against an isolated Embedded H2 JDBC database covering:
+Run `./test-backend.sh` to execute all **61 assertions** live against an isolated Embedded H2 JDBC database covering:
 - Embedded H2 auto-initialization, `OrgJdbcDao`, `UserJdbcDao`, `RuleJdbcDao`, `AttackLogJdbcDao`, and `BlockedIpJdbcDao` CRUD + cross-restart `.mv.db` reload verification
 - Admin/Viewer login, anti-enumeration error handling, viewer registration, and RBAC denial (`UnauthorizedRoleException`)
 - All 22 compiled regex rules, false-positive safety (`O'Brien`, single weak signal), double-encoded path traversal, inline SQL comment bypass, HTML-encoded XSS, null-byte traversal, and `User-Agent` inspection

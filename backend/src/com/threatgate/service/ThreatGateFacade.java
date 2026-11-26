@@ -17,6 +17,8 @@ import com.threatgate.model.Organization;
 import com.threatgate.model.User;
 import java.io.File;
 import java.io.IOException;
+import java.sql.Connection;
+import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -294,6 +296,29 @@ public final class ThreatGateFacade {
 
     public List<BlockedIp> extractActiveBlockedIps(User actor) throws UnauthorizedRoleException, DatabaseException {
         return bruteForceService.listBlockedIps(actor);
+    }
+
+    public TrafficPipelineService.TryModeReport runTryModeDemo(int orgId, int totalRequests)
+            throws InterruptedException {
+        TrafficPipelineService.TryModeReport report;
+        if (databaseActive) {
+            try (Connection keepAlive = databaseConnection.getConnection()) {
+                if (keepAlive != null) {
+                    report = trafficPipelineService.runTryModeDemo(orgId, totalRequests);
+                } else {
+                    report = trafficPipelineService.runTryModeDemo(orgId, totalRequests);
+                }
+            } catch (DatabaseException | SQLException e) {
+                report = trafficPipelineService.runTryModeDemo(orgId, totalRequests);
+            }
+        } else {
+            report = trafficPipelineService.runTryModeDemo(orgId, totalRequests);
+            try {
+                saveOfflineState();
+            } catch (IOException ignored) {
+            }
+        }
+        return report;
     }
 
     public void exportEntireDatabaseToCsv(int orgId, User actor)

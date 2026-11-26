@@ -23,8 +23,13 @@ public class AttackLogJdbcDao {
 
     public AttackLog insert(AttackLog log) throws DatabaseException {
         String sql = "INSERT INTO attack_logs "
-                + "(org_id, ip_address, method, path, category, risk_score, action, matched_rule_id, user_agent) "
-                + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
+                + "(org_id, ip_address, method, path, category, risk_score, action, matched_rule_id, user_agent, created_at) "
+                + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+        Timestamp createdAt = log.getCreatedAt() != null
+                ? log.getCreatedAt()
+                : new Timestamp(System.currentTimeMillis());
+        log.setCreatedAt(createdAt);
+
         try (Connection connection = databaseConnection.getConnection();
              PreparedStatement statement = connection.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
             statement.setInt(1, log.getOrgId());
@@ -44,31 +49,16 @@ public class AttackLogJdbcDao {
             } else {
                 statement.setNull(9, Types.VARCHAR);
             }
+            statement.setTimestamp(10, createdAt);
             statement.executeUpdate();
             try (ResultSet keys = statement.getGeneratedKeys()) {
                 if (keys.next()) {
-                    long generatedId = keys.getLong(1);
-                    return findById(generatedId, log);
+                    log.setId(keys.getLong(1));
                 }
             }
             return log;
         } catch (SQLException e) {
             throw new DatabaseException("Failed to insert attack log: " + e.getMessage(), e);
-        }
-    }
-
-    private AttackLog findById(long id, AttackLog fallback) throws SQLException, DatabaseException {
-        String sql = SELECT_COLUMNS + "WHERE id = ?";
-        try (Connection connection = databaseConnection.getConnection()) {
-            return JdbcTemplateHelper.queryForOptional(
-                    connection,
-                    sql,
-                    statement -> statement.setLong(1, id),
-                    AttackLogJdbcDao::mapRow
-            ).orElseGet(() -> {
-                fallback.setId(id);
-                return fallback;
-            });
         }
     }
 
