@@ -4,17 +4,24 @@ import com.threatgate.db.AttackLogJdbcDao;
 import com.threatgate.db.BlockedIpJdbcDao;
 import com.threatgate.db.DatabaseConfig;
 import com.threatgate.db.DatabaseConnection;
+import com.threatgate.db.OrgJdbcDao;
 import com.threatgate.db.RuleJdbcDao;
 import com.threatgate.db.SchemaInitializer;
 import com.threatgate.db.UserJdbcDao;
 import com.threatgate.exception.DatabaseException;
+import com.threatgate.exception.UnauthorizedRoleException;
 import com.threatgate.model.AttackLog;
 import com.threatgate.model.BlockedIp;
 import com.threatgate.model.DetectionRule;
+import com.threatgate.model.Organization;
 import com.threatgate.model.User;
 import java.io.File;
 import java.io.IOException;
+import java.sql.Timestamp;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 public final class ThreatGateFacade {
     private static final long DEFAULT_SWEEPER_INTERVAL_MS = 30_000L;
@@ -24,6 +31,8 @@ public final class ThreatGateFacade {
     private final DatabaseConfig databaseConfig;
     private final DatabaseConnection databaseConnection;
     private final SchemaInitializer schemaInitializer;
+    private final OrgJdbcDao orgJdbcDao;
+    private final RuleJdbcDao ruleJdbcDao;
     private final FilePersistenceService filePersistenceService;
 
     private final AuthService authService;
@@ -49,14 +58,15 @@ public final class ThreatGateFacade {
             long sweeperIntervalMs) {
         this.dataDirectory = dataDirectory;
         this.configFilePath = configFilePath;
-        this.databaseConfig = DatabaseConfig.load(configFilePath, exampleConfigPath);
+        this.databaseConfig = DatabaseConfig.forEmbeddedDirectory(dataDirectory, configFilePath, exampleConfigPath);
         this.databaseConnection = new DatabaseConnection(databaseConfig);
         this.schemaInitializer = new SchemaInitializer(databaseConnection);
+        this.orgJdbcDao = new OrgJdbcDao(databaseConnection);
+        this.ruleJdbcDao = new RuleJdbcDao(databaseConnection);
         this.filePersistenceService = new FilePersistenceService();
         this.activeOrgId = databaseConfig.getWafOrgId();
 
         UserJdbcDao userJdbcDao = new UserJdbcDao(databaseConnection);
-        RuleJdbcDao ruleJdbcDao = new RuleJdbcDao(databaseConnection);
         AttackLogJdbcDao attackLogJdbcDao = new AttackLogJdbcDao(databaseConnection);
         BlockedIpJdbcDao blockedIpJdbcDao = new BlockedIpJdbcDao(databaseConnection);
 
@@ -176,6 +186,29 @@ public final class ThreatGateFacade {
         }
     }
 
+    public boolean switchToEmbeddedDatabase(String dbFilePath, boolean saveProperties) throws DatabaseException {
+        String effectivePath = dbFilePath != null && !dbFilePath.trim().isEmpty()
+                ? dbFilePath.trim()
+                : new File(dataDirectory, "threatgate").getAbsolutePath();
+        databaseConfig.setDriver("org.h2.Driver");
+        databaseConfig.setUrl(DatabaseConfig.buildH2Url(effectivePath));
+        databaseConfig.setServerUrl("");
+        databaseConfig.setUser("sa");
+        databaseConfig.setPassword("");
+
+        if (!tryActivateDatabase()) {
+            throw new DatabaseException("Could not open Embedded H2 database: " + databaseConnection.getLastError());
+        }
+        if (saveProperties && configFilePath != null) {
+            try {
+                databaseConfig.saveToFile(configFilePath);
+            } catch (IOException e) {
+                throw new DatabaseException("Opened H2 database, but failed saving db.properties: " + e.getMessage(), e);
+            }
+        }
+        return true;
+    }
+
     public boolean reconnectDatabase(
             String host,
             int port,
@@ -187,6 +220,7 @@ public final class ThreatGateFacade {
         String safeHost = host != null && !host.trim().isEmpty() ? host.trim() : "localhost";
         int safePort = port > 0 ? port : 3306;
         String params = "?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC";
+        databaseConfig.setDriver("com.mysql.cj.jdbc.Driver");
         databaseConfig.setDatabaseName(safeDb);
         databaseConfig.setServerUrl("jdbc:mysql://" + safeHost + ":" + safePort + "/" + params);
         databaseConfig.setUrl("jdbc:mysql://" + safeHost + ":" + safePort + "/" + safeDb + params);
@@ -221,6 +255,54 @@ public final class ThreatGateFacade {
                 viewerHash
         );
         ruleService.loadFromDatabase(activeOrgId);
+    }
+
+    public Map<String, Long> getDatabaseTableCounts() throws DatabaseException {
+        if (databaseActive) {
+            return schemaInitializer.countAllTables();
+        }
+        Map<String, Long> counts = new LinkedHashMap<>();
+        counts.put("orgs", 1L);
+        counts.put("users", (long) authService.getAllOfflineUsers().size());
+        counts.put("rules", (long) ruleService.listRules(activeOrgId).size());
+        counts.put("attack_logs", (long) attackLogService.getAllOfflineLogs().size());
+        counts.put("blocked_ips", (long) bruteForceService.getAllOfflineBlocks().size());
+        return counts;
+    }
+
+    public List<Organization> extractAllOrganizations() throws DatabaseException {
+        if (databaseActive) {
+            return orgJdbcDao.findAll();
+        }
+        return Collections.singletonList(new Organization(activeOrgId, "Demo Org", new Timestamp(System.currentTimeMillis())));
+    }
+
+    public List<User> extractAllUsers(User actor) throws UnauthorizedRoleException, DatabaseException {
+        return authService.listUsers(actor);
+    }
+
+    public List<DetectionRule> extractAllRules(int orgId) throws DatabaseException {
+        if (databaseActive) {
+            return ruleJdbcDao.findAllByOrg(orgId);
+        }
+        return ruleService.listRules(orgId);
+    }
+
+    public List<AttackLog> extractAllAttackLogs(int orgId) throws DatabaseException {
+        return attackLogService.listAllLogs(orgId);
+    }
+
+    public List<BlockedIp> extractActiveBlockedIps(User actor) throws UnauthorizedRoleException, DatabaseException {
+        return bruteForceService.listBlockedIps(actor);
+    }
+
+    public void exportEntireDatabaseToCsv(int orgId, User actor)
+            throws UnauthorizedRoleException, DatabaseException, IOException {
+        authService.requireRole(actor, "admin");
+        filePersistenceService.exportUsersToCsv(extractAllUsers(actor), getUsersCsvPath());
+        filePersistenceService.exportRulesToCsv(extractAllRules(orgId), getRulesCsvPath());
+        filePersistenceService.exportAttackLogsToCsv(extractAllAttackLogs(orgId), getAttackLogsCsvPath());
+        filePersistenceService.exportBlockedIpsToCsv(extractActiveBlockedIps(actor), getBlockedIpsCsvPath());
     }
 
     public void saveOfflineState() throws IOException {
@@ -270,6 +352,10 @@ public final class ThreatGateFacade {
 
     public DatabaseConnection getDatabaseConnection() {
         return databaseConnection;
+    }
+
+    public OrgJdbcDao getOrgJdbcDao() {
+        return orgJdbcDao;
     }
 
     public FilePersistenceService getFilePersistenceService() {

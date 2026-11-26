@@ -79,7 +79,10 @@ public class UserJdbcDao {
             }
             return user;
         } catch (SQLException e) {
-            if ("23000".equals(e.getSQLState()) || e.getErrorCode() == 1062) {
+            String sqlState = e.getSQLState();
+            if ((sqlState != null && sqlState.startsWith("23"))
+                    || e.getErrorCode() == 1062
+                    || e.getErrorCode() == 23505) {
                 throw new InvalidDataException("An account with that email already exists.", e);
             }
             throw new DatabaseException("Failed to create user: " + e.getMessage(), e);

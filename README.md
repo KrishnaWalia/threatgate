@@ -1,6 +1,6 @@
 # ThreatGate — Java CLI Web Application Firewall
 
-ThreatGate inspects HTTP requests against a **rules-as-data detection engine**, detects and blocks **SQL injection, XSS, path traversal, and brute-force attacks**, aggregates live traffic analytics with **Java Streams**, coordinates simulated/batch traffic using **multithreaded producer-consumer pipelines**, and persists state via **MySQL JDBC** with automatic **CSV/file fallback** — built as a pure Java CLI backend aligned 1-for-1 with the ThreatGate React `frontend/` and `schema/schema.sql`.
+ThreatGate inspects HTTP requests against a **rules-as-data detection engine**, detects and blocks **SQL injection, XSS, path traversal, and brute-force attacks**, aggregates live traffic analytics with **Java Streams**, coordinates simulated/batch traffic using **multithreaded producer-consumer pipelines**, and persists everything directly into an **embedded zero-server H2 JDBC database (`backend/data/threatgate.mv.db`)** — built as a pure Java CLI backend aligned 1-for-1 with the ThreatGate React `frontend/` and `schema/schema.sql`.
 
 ```text
 +---------------------------------------------------------------------------------------------------+
@@ -9,7 +9,7 @@ ThreatGate inspects HTTP requests against a **rules-as-data detection engine**, 
 |   Main CLI Console (app/Main.java)                                                                |
 |    |-- Auth Gate & RBAC (AuthService: admin / viewer, PasswordUtil SHA-256 + salt)                |
 |    |-- Dashboard Overview & Live Feed (DashboardService & AttackLogService via Stream API)        |
-|    '-- Interactive Request Tester & Attack Demo                                                   |
+|    '-- Database Explorer ([9] Extract & List Saved orgs/users/rules/attack_logs/blocked_ips)      |
 |           |                                                                                       |
 |           v                                                                                       |
 |   TrafficPipelineService                                                                          |
@@ -19,10 +19,10 @@ ThreatGate inspects HTTP requests against a **rules-as-data detection engine**, 
 |    '-- WAF Lifecycle: Active IP Block? -> Rate Limit? -> DetectionEngine -> Log & Track Strikes   |
 |           |                                             |                                         |
 |           v                                             v                                         |
-|   MySQL JDBC Layer (db/)                       Offline / File I/O Layer (service/)                |
-|    |-- DatabaseConnection (DriverManager)       |-- CSV Import/Export (BufferedReader/Writer)     |
-|    |-- SchemaInitializer (Statement DDL)        |-- Binary Audit Snapshot (FileInput/OutputStream)|
-|    '-- User/Rule/AttackLog/BlockedIp JDBC DAOs  '-- Tokenized Rule Import (StreamTokenizer)       |
+|   Embedded H2 JDBC Database (Default, Zero Server)     File I/O Layer (service/)                  |
+|    |-- backend/data/threatgate.mv.db                    |-- CSV Import/Export (BufferedReader/W)  |
+|    |-- DatabaseConnection (DriverManager)               |-- Binary Audit Snapshot (FileIn/OutStrm)|
+|    '-- Org/User/Rule/AttackLog/BlockedIp JDBC DAOs      '-- Tokenized Rule Import (StreamTokenizer|
 +---------------------------------------------------------------------------------------------------+
                                    |
                                    v  Aligned Data Contract & Features
@@ -31,9 +31,9 @@ ThreatGate inspects HTTP requests against a **rules-as-data detection engine**, 
 
 ---
 
-## Quick Start (One Command via Bash)
+## Quick Start (Zero Server Setup)
 
-Requires **JDK 8+** (built and verified on **JDK 26.0.2**). No external framework or build tool is needed, and MySQL is optional (automatic CSV persistence runs whenever MySQL is unreachable).
+Requires **JDK 8+** (built and verified on **JDK 26.0.2**). The embedded H2 JDBC driver (`backend/lib/h2-2.3.232.jar`) is bundled in the repository — **no external MySQL server or password is needed**. Every action saves directly to `backend/data/threatgate.mv.db` via JDBC, and you can extract and list any saved table inside CLI menu `[9]`.
 
 From the repository root:
 
@@ -47,7 +47,7 @@ Or using `run.sh`:
 ./run.sh
 ```
 
-Run the automated verification suite (53 assertions across auth, detection rules, brute-force windows, Streams, generics, multithreading, file I/O, and JDBC):
+Run the automated verification suite (**57 assertions** running live against Embedded H2 JDBC):
 
 ```bash
 ./test-backend.sh
@@ -64,8 +64,8 @@ From inside `backend/`:
 
 | Role | Email | Password | Capabilities |
 | :--- | :--- | :--- | :--- |
-| **Admin** | `admin@threatgate.dev` | `Admin123!` | Full console: Dashboard, Live Feed, Inspect/Demo, toggle/re-weight/add/delete rules, manage/unblock Blocked IPs, Simulator, File I/O, JDBC settings |
-| **Viewer** | `viewer@threatgate.dev` | `Viewer123!` | Read-only analytics: Dashboard, Live Feed, Inspect/Demo, view Detection Rules (admin mutations enforce `UnauthorizedRoleException`) |
+| **Admin** | `admin@threatgate.dev` | `Admin123!` | Full console: Dashboard, Live Feed, Inspect/Demo, toggle/re-weight/add/delete rules, manage/unblock Blocked IPs, Simulator, File I/O, Database Explorer (all tables + CSV export) |
+| **Viewer** | `viewer@threatgate.dev` | `Viewer123!` | Read-only analytics: Dashboard, Live Feed, Inspect/Demo, view Detection Rules, view `orgs`/`rules`/`attack_logs` in DB Explorer (admin mutations enforce `UnauthorizedRoleException`) |
 
 ---
 
@@ -77,12 +77,12 @@ threatgate/
 ├── test-backend.sh                               # Root test runner -> backend/test-cli.sh
 ├── run.sh                                        # One-command CLI backend startup
 ├── schema/
-│   └── schema.sql                                # Shared MySQL contract (orgs, users, rules, attack_logs, blocked_ips)
+│   └── schema.sql                                # Shared schema contract (orgs, users, rules, attack_logs, blocked_ips)
 ├── frontend/                                     # React + Vite + Tailwind UI (untouched)
 └── backend/
     ├── src/com/threatgate/
     │   ├── app/
-    │   │   └── Main.java                         # Interactive CLI console, ASCII charts & safe Scanner input
+    │   │   └── Main.java                         # Interactive CLI console, DB Explorer & ASCII charts
     │   ├── model/
     │   │   ├── Identifiable.java                 # Generic ID contract Identifiable<ID>
     │   │   ├── DataRepository.java               # Generic CRUD interface DataRepository<T extends Identifiable<ID>, ID>
@@ -110,9 +110,10 @@ threatgate/
     │   │   ├── RowMapper.java                    # @FunctionalInterface ResultSet -> Java object mapper
     │   │   ├── StatementBinder.java              # @FunctionalInterface PreparedStatement parameter binder
     │   │   ├── JdbcTemplateHelper.java           # Reusable JDBC query execution & cursor iteration
-    │   │   ├── DatabaseConfig.java               # Loads/saves db.properties & WAF thresholds
+    │   │   ├── DatabaseConfig.java               # Loads/saves db.properties & Embedded H2 / MySQL settings
     │   │   ├── DatabaseConnection.java           # Class.forName + DriverManager connection management
-    │   │   ├── SchemaInitializer.java            # DDL schema creation & default seed via Statement/PreparedStatement
+    │   │   ├── SchemaInitializer.java            # DDL schema creation, table counts & default seed
+    │   │   ├── OrgJdbcDao.java                   # PreparedStatement CRUD for orgs table
     │   │   ├── UserJdbcDao.java                  # PreparedStatement CRUD for users table
     │   │   ├── RuleJdbcDao.java                  # PreparedStatement CRUD for rules table
     │   │   ├── AttackLogJdbcDao.java             # PreparedStatement CRUD & SQL counts for attack_logs
@@ -134,13 +135,14 @@ threatgate/
     │   │   ├── ExpirySweeperWorker.java          # Daemon Thread (MIN_PRIORITY) purging expired blocks
     │   │   ├── TrafficPipelineService.java       # Orchestration, demo batch, benchmark & 6-state trace
     │   │   ├── FilePersistenceService.java       # CSV, FileInputStream/FileOutputStream & StreamTokenizer
-    │   │   └── ThreatGateFacade.java             # Unified facade selecting MySQL JDBC or CSV fallback
+    │   │   └── ThreatGateFacade.java             # Unified facade for Embedded H2 JDBC, extraction & CSV fallback
     │   └── test/
-    │       └── ThreatGateTestRunner.java         # Automated 53-assertion verification suite
+    │       └── ThreatGateTestRunner.java         # Automated 57-assertion verification suite
     ├── data/
     │   └── sample_rules_tokens.txt               # Sample StreamTokenizer rule import file
-    ├── lib/                                      # Place mysql-connector-j-*.jar here
-    ├── db.properties.example                     # Sample MySQL JDBC & WAF configuration
+    ├── lib/
+    │   └── h2-2.3.232.jar                        # Bundled Embedded H2 JDBC driver (zero external server)
+    ├── db.properties.example                     # Default Embedded H2 & optional MySQL configuration
     ├── start-cli.sh                              # Compiles src/ -> bin/ and starts Main CLI
     ├── test-cli.sh                               # Compiles src/ -> bin/ and runs ThreatGateTestRunner
     └── README.md                                 # Detailed backend reference
@@ -156,7 +158,7 @@ threatgate/
 | **Thread Lifecycle & Scheduling** | Live snapshot and deterministic trace of all 6 `Thread.State` values (`NEW`, `RUNNABLE`, `BLOCKED`, `WAITING`, `TIMED_WAITING`, `TERMINATED`), daemon sweeper (`setDaemon(true)`), and priority levels (`MIN_PRIORITY`, `NORM_PRIORITY`, `MAX_PRIORITY`) |
 | **Synchronization & Intrinsic Locks** | `synchronized` methods and private `lock` monitors in `SlidingWindow`, `GenericStore`, `AttackLogService`, `BruteForceService`, `RuleService`, and `volatile` stop flags for cross-thread visibility |
 | **Inter-Thread Communication** | `RequestBuffer<T>` bounded monitor with guarded `while` blocks calling `wait()` and `notifyAll()` between producer and consumer threads |
-| **JDBC & Database Programming** | `Class.forName` driver loading, `DriverManager`, `Connection`, `Statement` DDL, `PreparedStatement` parameter binding, `ResultSet` cursor iteration, typed getters, `RowMapper`, and CRUD DAOs for `users`, `rules`, `attack_logs`, and `blocked_ips` |
+| **JDBC & Database Programming** | `Class.forName("org.h2.Driver")`, `DriverManager`, `Connection`, `Statement` DDL, `PreparedStatement` parameter binding, `ResultSet` cursor iteration, typed getters, `RowMapper`, and CRUD DAOs for all 5 tables (`orgs`, `users`, `rules`, `attack_logs`, `blocked_ips`) |
 | **Lambda Expressions & Stream API** | Custom `@FunctionalInterface`s (`RowMapper`, `StatementBinder`, `RequestValidator`, `RuleMatcher`), method references (`::`), `Stream` pipelines with `filter()`, `map()`, `sorted()`, `distinct()`, `limit()`, `skip()`, `collect()`, `count()` |
 | **Generics** | `Identifiable<ID>`, `DataRepository<T extends Identifiable<ID>, ID>`, `GenericStore<T, ID>`, `RequestBuffer<T>`, `CsvImportResult<T>`, diamond operator `<>`, upper/lower bounded wildcards (`? extends`, `? super`) |
 | **File Handling & CSV Integration** | `FileReader`/`BufferedReader` and `FileWriter`/`BufferedWriter` for CSV import/export with malformed-row resilience, `FileInputStream`/`FileOutputStream` for binary audit snapshots and byte-by-byte backups, and `StreamTokenizer` for tokenized rule imports |
@@ -167,57 +169,28 @@ threatgate/
 
 1. **Dashboard Overview**: Displays the 4 stat cards (`Total Requests`, `Blocked`, `Allowed`, `Active IP Blocks`), an ASCII 24h bar chart by attack category, and an hourly `HH:mm` allowed-vs-blocked timeline matching `frontend/src/pages/Dashboard.jsx`.
 2. **Live Request Feed**: View recent logs, filter & paginate with Streams (`category` / `action`), list distinct blocked IPs, or display top high-risk events.
-3. **Inspect Single HTTP Request**: Enter IP, HTTP method, path/query, body, `User-Agent`, `Referer`, `Cookie`, and optional login response status (`200`/`401`/`403`) to test the WAF pipeline interactively.
-4. **Automated Attack Demo**: Runs a multithreaded producer-consumer batch across benign queries (`O'Brien`, `/search?q=hello`), SQLi (`' OR '1'='1`, `UNION/**/SELECT`), XSS (`<script>alert(1)</script>`), double-encoded path traversal (`%252e%252e%252fetc/passwd`), login brute force, and repeated attack strikes.
-5. **Detection Rules**: View all 22 rules-as-data; Admins can toggle rules ON/OFF, re-weight (`1–100`), add custom regex rules, or delete custom rules live.
+3. **Inspect Single HTTP Request**: Enter IP, HTTP method, path/query, body, `User-Agent`, `Referer`, `Cookie`, and optional login response status (`200`/`401`/`403`) to test and save directly to the database.
+4. **Automated Attack Demo**: Runs a multithreaded producer-consumer batch across benign queries (`O'Brien`, `/search?q=hello`), SQLi (`' OR '1'='1`, `UNION/**/SELECT`), XSS (`<script>alert(1)</script>`), double-encoded path traversal (`%252e%252e%252fetc/passwd`), login brute force, and repeated attack strikes — persisting every decision to `threatgate.mv.db`.
+5. **Detection Rules**: View all 22 rules-as-data; Admins can toggle rules ON/OFF, re-weight (`1–100`), add custom regex rules, or delete custom rules live in the database.
 6. **Blocked IPs Management *(Admin Only)***: View active blocks, manually block an IP (temporary or permanent), unblock an IP (resetting all sliding windows), or purge expired entries.
 7. **Multithreaded Simulator & Thread Monitor**: Start/stop continuous background producer-consumer simulation, inspect live threads and trace all 6 `Thread.State` transitions, or run the sequential-vs-concurrent benchmark.
 8. **File I/O Tools**: Export/import CSVs (`rules`, `attack_logs`, `blocked_ips`), generate/parse tokenized rules via `StreamTokenizer`, write/verify binary audit snapshots via `FileOutputStream`/`FileInputStream`, and copy CSV backups byte-by-byte.
-9. **Database / JDBC Settings**: Inspect JDBC driver/URL/status, test or configure MySQL credentials live, re-run `SchemaInitializer`, or save offline CSV state.
-
----
-
-## Detection Rules & Brute-Force Mechanics
-
-- **3-Pass Normalization (`DetectionEngine.normalize`)**: Caps target length at 20,000 chars, converts `+` to space, runs up to 3 rounds of decoding (`%XX`, `%uXXXX`, `\uXXXX`, `&#xHEX;`, `&#DEC;`, named entities `&lt; &gt; &quot; &apos; &amp; &sol; &bsol;`), strips inline SQL comments (`/*...*/`), and collapses whitespace across `path`, `query`, `body`, `user-agent`, `referer`, and `cookie`.
-- **Risk Scoring Formula**:
-  ```text
-  risk = min(100, W_max + 0.5 * sum(weights of other distinct matched rules))
-  ```
-  Each rule counts at most once per request. Requests with `risk >= 50` (`BLOCK_THRESHOLD`) are blocked (`403`). Weak rules (weight `40`, e.g. `SELECT ... FROM` or `alert(`) do not block on their own so benign inputs like `O'Brien` or `select the best items from our store` remain allowed.
-- **Brute-Force Sliding Windows (`BruteForceService`)**:
-  - Failed Logins: `>= 5` (`401`/`403` on login paths) within `60s`
-  - Request Rate: `> 100` requests within `10s`
-  - Attack Strikes: `>= 8` blocked requests within `60s`
-  - **Lazy Expiry**: `findActiveBlock()` evaluates `expires_at` on every check and immediately evicts expired blocks; `ExpirySweeperWorker` also purges expired rows on a daemon timer. Unblocking resets all counters for that IP.
-
----
-
-## MySQL JDBC Configuration
-
-1. Ensure MySQL Server 8.0 is running and `mysql-connector-j-26.10.0.jar` is present in `backend/lib/` (the startup scripts also check `D:/jdbc/mysql-connector-j-26.10.0/mysql-connector-j-26.10.0.jar` and `$MYSQL_JDBC_JAR`).
-2. Copy `backend/db.properties.example` to `backend/db.properties` and set your MySQL username/password (or configure interactively via CLI option `[3]` at sign-in or `[9]` inside the console):
-   ```properties
-   db.driver=com.mysql.cj.jdbc.Driver
-   db.url=jdbc:mysql://localhost:3306/threatgate?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
-   db.serverUrl=jdbc:mysql://localhost:3306/?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
-   db.name=threatgate
-   db.user=root
-   db.password=your_password
-   ```
-3. On startup, `SchemaInitializer` automatically creates the `threatgate` database and all 5 tables (`orgs`, `users`, `rules`, `attack_logs`, `blocked_ips`) if absent, and seeds `Demo Org`, `admin@threatgate.dev`, `viewer@threatgate.dev`, and all 22 default rules.
-4. If MySQL is unavailable or rejects credentials, ThreatGate switches cleanly to **Offline CSV Fallback Mode** in `backend/data/`.
+9. **Database Explorer (Extract & List Saved DB Tables)**:
+   - Displays live JDBC table row counts (`orgs`, `users`, `rules`, `attack_logs`, `blocked_ips`) and DB file size.
+   - Extract and list **All Saved Tables Overview**, or inspect individual tables (`orgs`, `users`, `rules`, `attack_logs`, `blocked_ips`) straight from the database.
+   - Export the entire saved database to CSV files or switch to another local `.mv.db` file / optional external MySQL JDBC server.
 
 ---
 
 ## Automated Verification (`ThreatGateTestRunner`)
 
-Run `./test-backend.sh` to execute all **53 assertions** covering:
+Run `./test-backend.sh` to execute all **57 assertions** live against an isolated Embedded H2 JDBC database covering:
+- Embedded H2 auto-initialization, `OrgJdbcDao`, `UserJdbcDao`, `RuleJdbcDao`, `AttackLogJdbcDao`, and `BlockedIpJdbcDao` CRUD + cross-restart `.mv.db` reload verification
 - Admin/Viewer login, anti-enumeration error handling, viewer registration, and RBAC denial (`UnauthorizedRoleException`)
 - All 22 compiled regex rules, false-positive safety (`O'Brien`, single weak signal), double-encoded path traversal, inline SQL comment bypass, HTML-encoded XSS, null-byte traversal, and `User-Agent` inspection
 - Rules-as-data live toggle, re-weighting, custom rule addition, and invalid regex rejection
 - `SlidingWindow` eviction, failed-login auto-block, successful-login reset, attack-strike block, short-TTL lazy expiry, and admin unblock reset
 - Stream API analytics (`getStats`, `getPagedLogs`, `getDistinctBlockedIps`, `getTopHighRiskLogs`)
 - `GenericStore<T, ID>` and bounded wildcards (`? super T`, `? extends Identifiable<?>`)
-- Multithreaded producer-consumer batch, 8-thread concurrent stress test (200/200 logs with zero loss), daemon `ExpirySweeperWorker`, and all 6 `Thread.State` transitions
-- CSV round-trip with malformed line skipping, `FileOutputStream`/`FileInputStream` binary audit snapshot & byte copy, `StreamTokenizer` parsing, JDBC driver loading, and offline restart reload
+- Multithreaded producer-consumer batch, 8-thread concurrent stress test (200/200 logs saved into H2 with zero race-condition loss), daemon `ExpirySweeperWorker`, and all 6 `Thread.State` transitions
+- CSV round-trip with malformed line skipping, `FileOutputStream`/`FileInputStream` binary audit snapshot & byte copy, `StreamTokenizer` parsing, and optional offline CSV fallback mode

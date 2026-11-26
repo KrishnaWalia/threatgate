@@ -12,6 +12,7 @@ import com.threatgate.model.DetectionRule;
 import com.threatgate.model.GenericStore;
 import com.threatgate.model.InspectionRequest;
 import com.threatgate.model.InspectionResult;
+import com.threatgate.model.Organization;
 import com.threatgate.model.User;
 import com.threatgate.service.AuthService;
 import com.threatgate.service.BruteForceService;
@@ -44,12 +45,15 @@ public final class ThreatGateTestRunner {
         String testDataDir = baseDir + File.separator + "data" + File.separator + "test_suite_run";
         deleteRecursive(new File(testDataDir));
 
-        String configPath = baseDir + File.separator + "db.properties";
+        String isolatedConfigPath = testDataDir + File.separator + "no_override.properties";
         String examplePath = baseDir + File.separator + "db.properties.example";
 
-        ThreatGateFacade facade = new ThreatGateFacade(testDataDir, configPath, examplePath, false, 0L);
+        ThreatGateFacade facade = new ThreatGateFacade(testDataDir, isolatedConfigPath, examplePath, true, 0L);
 
         try {
+            assertCondition(facade.isDatabaseActive() && facade.getDatabaseConfig().isEmbeddedH2(),
+                    "Test 0.1: Embedded H2 JDBC database connected and initialized automatically");
+
             User[] users = runAuthAndRbacTests(facade);
             User admin = users[0];
             User viewer = users[1];
@@ -61,7 +65,7 @@ public final class ThreatGateTestRunner {
             runGenericsTests();
             runMultithreadingTests(facade);
             runFileIoTests(facade, testDataDir);
-            runJdbcAndPersistenceReloadTests(testDataDir, configPath, examplePath);
+            runJdbcAndPersistenceReloadTests(facade, admin, testDataDir, isolatedConfigPath, examplePath);
 
             System.out.printf("%n>>> ALL %d THREATGATE VERIFICATION ASSERTIONS PASSED SUCCESSFULLY! <<<%n", passCount);
         } finally {
@@ -420,36 +424,70 @@ public final class ThreatGateTestRunner {
     }
 
     private static void runJdbcAndPersistenceReloadTests(
+            ThreatGateFacade facade,
+            User admin,
             String testDataDir,
-            String configPath,
+            String isolatedConfigPath,
             String examplePath) throws Exception {
-        DatabaseConfig dbConfig = DatabaseConfig.load(configPath, examplePath);
+        DatabaseConfig dbConfig = DatabaseConfig.forEmbeddedDirectory(testDataDir, isolatedConfigPath, examplePath);
         DatabaseConnection dbConn = new DatabaseConnection(dbConfig);
         dbConn.loadDriver();
-        assertCondition(true, "Test 9.1: MySQL JDBC Driver loaded via Class.forName(" + dbConfig.getDriver() + ")");
+        assertCondition("org.h2.Driver".equals(dbConfig.getDriver()),
+                "Test 9.1: Embedded H2 JDBC Driver loaded via Class.forName(org.h2.Driver)");
+
+        List<Organization> orgs = facade.extractAllOrganizations();
+        assertCondition(orgs.size() == 1 && "Demo Org".equals(orgs.get(0).getName()),
+                "Test 9.2: OrgJdbcDao extracted Demo Org from saved DB");
+
+        Map<String, Long> tableCounts = facade.getDatabaseTableCounts();
+        assertCondition(tableCounts.get("orgs") == 1L
+                        && tableCounts.get("users") >= 3L
+                        && tableCounts.get("rules") == 22L
+                        && tableCounts.get("attack_logs") > 200L,
+                "Test 9.3: Live JDBC table row counts verified across all saved tables");
+
+        List<User> extractedUsers = facade.extractAllUsers(admin);
+        assertCondition(extractedUsers.size() >= 3,
+                "Test 9.4: UserJdbcDao extracted registered users from DB");
 
         String reloadDir = testDataDir + File.separator + "reload_verify";
-        ThreatGateFacade firstSession = new ThreatGateFacade(reloadDir, configPath, examplePath, false, 0L);
+        String reloadCfg = reloadDir + File.separator + "no_override.properties";
+        ThreatGateFacade firstSession = new ThreatGateFacade(reloadDir, reloadCfg, examplePath, true, 0L);
+        User reloadAdmin = firstSession.getAuthService().login(
+                AuthService.DEFAULT_ADMIN_EMAIL,
+                AuthService.DEFAULT_ADMIN_PASSWORD
+        );
+        firstSession.getAuthService().register("persisted@threatgate.dev", "Persist123!", 1);
+        firstSession.getRuleService().addRule(reloadAdmin, "other", "\\breload_marker\\b", 77, "Reload marker rule");
         firstSession.getTrafficPipelineService().processSingleRequest(
                 new InspectionRequest(1, "203.0.113.55", "GET", "/search?q=<script>alert(9)</script>", "", "reload-test"));
+        firstSession.getBruteForceService().manualBlockIp(reloadAdmin, "198.51.100.250", "Persisted block", null);
         firstSession.shutdown();
 
-        ThreatGateFacade secondSession = new ThreatGateFacade(reloadDir, configPath, examplePath, false, 0L);
-        List<AttackLog> reloadedLogs = secondSession.getAttackLogService().listAllLogs(1);
+        ThreatGateFacade secondSession = new ThreatGateFacade(reloadDir, reloadCfg, examplePath, true, 0L);
+        User persistedUser = secondSession.getAuthService().login("persisted@threatgate.dev", "Persist123!");
+        List<DetectionRule> reloadedRules = secondSession.extractAllRules(1);
+        List<AttackLog> reloadedLogs = secondSession.extractAllAttackLogs(1);
+        List<BlockedIp> reloadedBlocks = secondSession.extractActiveBlockedIps(reloadAdmin);
         secondSession.shutdown();
-        assertCondition(reloadedLogs.size() == 1 && "203.0.113.55".equals(reloadedLogs.get(0).getIpAddress()),
-                "Test 9.2: CSV persistence reloaded attack log cleanly across facade restart");
 
-        boolean liveMySql = dbConn.testConnection();
-        if (liveMySql) {
-            ThreatGateFacade dbSession = new ThreatGateFacade(reloadDir, configPath, examplePath, true, 0L);
-            assertCondition(dbSession.isDatabaseActive(),
-                    "Test 9.3: Live MySQL JDBC connection and schema initialization verified");
-            dbSession.shutdown();
-        } else {
-            assertCondition(!dbConn.getLastError().isEmpty(),
-                    "Test 9.3: Offline MySQL JDBC handled gracefully without crash (" + dbConn.getLastError() + ")");
-        }
+        assertCondition("persisted@threatgate.dev".equals(persistedUser.getEmail())
+                        && reloadedRules.size() == 23
+                        && reloadedLogs.size() == 1
+                        && "203.0.113.55".equals(reloadedLogs.get(0).getIpAddress())
+                        && reloadedBlocks.stream().anyMatch(b -> "198.51.100.250".equals(b.getIpAddress())),
+                "Test 9.5: Embedded H2 .mv.db persisted users, rules, attack_logs, and blocked_ips across restart");
+
+        String csvFallbackDir = testDataDir + File.separator + "csv_fallback";
+        ThreatGateFacade offlineSession = new ThreatGateFacade(csvFallbackDir, isolatedConfigPath, examplePath, false, 0L);
+        offlineSession.getTrafficPipelineService().processSingleRequest(
+                new InspectionRequest(1, "203.0.113.88", "GET", "/home", "", "csv-fallback"));
+        offlineSession.shutdown();
+        ThreatGateFacade offlineReload = new ThreatGateFacade(csvFallbackDir, isolatedConfigPath, examplePath, false, 0L);
+        List<AttackLog> csvLogs = offlineReload.extractAllAttackLogs(1);
+        offlineReload.shutdown();
+        assertCondition(!offlineReload.isDatabaseActive() && csvLogs.size() == 1,
+                "Test 9.6: Optional offline CSV fallback mode verified independently");
     }
 
     private static String resolveBackendBaseDir() {

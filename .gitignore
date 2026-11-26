@@ -6,9 +6,11 @@ dist/
 *.class
 backend/bin/
 backend/db.properties
-backend/lib/*.jar
+backend/lib/mysql-connector-j-*.jar
 backend/data/*_data.csv
 backend/data/*_backup.csv
 backend/data/*.bin
+backend/data/*.mv.db
+backend/data/*.trace.db
 backend/data/test_*
 *.tmp

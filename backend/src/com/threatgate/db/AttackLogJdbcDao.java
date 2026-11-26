@@ -106,8 +106,8 @@ public class AttackLogJdbcDao {
 
     public long[] countByAction(int orgId) throws DatabaseException {
         String sql = "SELECT COUNT(*) AS total_requests, "
-                + "COALESCE(SUM(action = 'blocked'), 0) AS total_blocked, "
-                + "COALESCE(SUM(action = 'allowed'), 0) AS total_allowed "
+                + "COALESCE(SUM(CASE WHEN action = 'blocked' THEN 1 ELSE 0 END), 0) AS total_blocked, "
+                + "COALESCE(SUM(CASE WHEN action = 'allowed' THEN 1 ELSE 0 END), 0) AS total_allowed "
                 + "FROM attack_logs WHERE org_id = ?";
         try (Connection connection = databaseConnection.getConnection();
              PreparedStatement statement = connection.prepareStatement(sql)) {

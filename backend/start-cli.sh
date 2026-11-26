@@ -27,29 +27,34 @@ case "$(uname -s)" in
     ;;
 esac
 
-JDBC_JAR=""
-if [ -n "${MYSQL_JDBC_JAR:-}" ] && [ -f "${MYSQL_JDBC_JAR}" ]; then
-  JDBC_JAR="${MYSQL_JDBC_JAR}"
-else
-  for candidate in lib/mysql-connector-j-*.jar /d/jdbc/mysql-connector-j-26.10.0/mysql-connector-j-26.10.0.jar; do
-    if [ -f "${candidate}" ]; then
-      JDBC_JAR="${candidate}"
-      break
+LIB_CP=""
+for jar in lib/*.jar; do
+  if [ -f "${jar}" ]; then
+    if command -v cygpath >/dev/null 2>&1; then
+      jar="$(cygpath -m "${jar}")"
     fi
-  done
-fi
+    if [ -z "${LIB_CP}" ]; then
+      LIB_CP="${jar}"
+    else
+      LIB_CP="${LIB_CP}${CP_SEP}${jar}"
+    fi
+  fi
+done
 
-if [ -n "${JDBC_JAR}" ] && command -v cygpath >/dev/null 2>&1; then
-  JDBC_JAR="$(cygpath -m "${JDBC_JAR}")"
+if [ -z "${LIB_CP}" ] && [ -n "${MYSQL_JDBC_JAR:-}" ] && [ -f "${MYSQL_JDBC_JAR}" ]; then
+  LIB_CP="${MYSQL_JDBC_JAR}"
+  if command -v cygpath >/dev/null 2>&1; then
+    LIB_CP="$(cygpath -m "${LIB_CP}")"
+  fi
 fi
 
 mkdir -p bin data
 JAVA_SOURCES="$(find src -name '*.java')"
 
 CP="bin"
-if [ -n "${JDBC_JAR}" ]; then
-  CP="bin${CP_SEP}${JDBC_JAR}"
-  "${JAVAC_BIN}" -cp "${JDBC_JAR}" -d bin -sourcepath src ${JAVA_SOURCES}
+if [ -n "${LIB_CP}" ]; then
+  CP="bin${CP_SEP}${LIB_CP}"
+  "${JAVAC_BIN}" -cp "${LIB_CP}" -d bin -sourcepath src ${JAVA_SOURCES}
 else
   "${JAVAC_BIN}" -d bin -sourcepath src ${JAVA_SOURCES}
 fi

@@ -7,6 +7,9 @@ import java.io.IOException;
 import java.util.Properties;
 
 public class DatabaseConfig {
+    private static final String H2_PREFIX = "jdbc:h2:file:";
+    private static final String H2_OPTIONS = ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;LOCK_TIMEOUT=10000";
+
     private String driver;
     private String url;
     private String serverUrl;
@@ -24,11 +27,11 @@ public class DatabaseConfig {
     private long blockDurationMs;
 
     public DatabaseConfig() {
-        this.driver = "com.mysql.cj.jdbc.Driver";
-        this.url = "jdbc:mysql://localhost:3306/threatgate?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC";
-        this.serverUrl = "jdbc:mysql://localhost:3306/?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC";
+        this.driver = "org.h2.Driver";
+        this.url = buildH2Url(new File("data", "threatgate").getAbsolutePath());
+        this.serverUrl = "";
         this.databaseName = "threatgate";
-        this.user = "root";
+        this.user = "sa";
         this.password = "";
         this.wafOrgId = 1;
         this.blockThreshold = 50;
@@ -39,6 +42,35 @@ public class DatabaseConfig {
         this.attackStrikeMax = 8;
         this.attackStrikeWindowMs = 60_000L;
         this.blockDurationMs = 300_000L;
+    }
+
+    public static String buildH2Url(String fileBasePath) {
+        String raw = fileBasePath != null ? fileBasePath.trim() : new File("data", "threatgate").getAbsolutePath();
+        if (raw.endsWith(".mv.db")) {
+            raw = raw.substring(0, raw.length() - 6);
+        }
+        String normalized = raw.replace('\\', '/');
+        return H2_PREFIX + normalized + H2_OPTIONS;
+    }
+
+    public static DatabaseConfig forEmbeddedDirectory(
+            String dataDirectory,
+            String primaryPath,
+            String fallbackPath) {
+        DatabaseConfig config = load(primaryPath, fallbackPath);
+        File primary = primaryPath != null ? new File(primaryPath) : null;
+        boolean hasPrimaryOverride = primary != null && primary.exists() && primary.isFile();
+        if (!hasPrimaryOverride || (config.isEmbeddedH2() && config.getUrl().contains("./data/threatgate"))) {
+            File dbBase = new File(dataDirectory, "threatgate");
+            config.setDriver("org.h2.Driver");
+            config.setUrl(buildH2Url(dbBase.getAbsolutePath()));
+            config.setServerUrl("");
+            if (!hasPrimaryOverride) {
+                config.setUser("sa");
+                config.setPassword("");
+            }
+        }
+        return config;
     }
 
     public static DatabaseConfig load(String primaryPath, String fallbackPath) {
@@ -67,7 +99,9 @@ public class DatabaseConfig {
     private void applyProperties(Properties properties) {
         this.driver = readString(properties, "db.driver", driver);
         this.url = readString(properties, "db.url", url);
-        this.serverUrl = readString(properties, "db.serverUrl", serverUrl);
+        if (properties.containsKey("db.serverUrl")) {
+            this.serverUrl = properties.getProperty("db.serverUrl", "").trim();
+        }
         this.databaseName = sanitizeDatabaseName(readString(properties, "db.name", databaseName));
         this.user = readString(properties, "db.user", user);
         this.password = properties.getProperty("db.password", password);
@@ -91,7 +125,7 @@ public class DatabaseConfig {
         Properties properties = new Properties();
         properties.setProperty("db.driver", driver);
         properties.setProperty("db.url", url);
-        properties.setProperty("db.serverUrl", serverUrl);
+        properties.setProperty("db.serverUrl", serverUrl != null ? serverUrl : "");
         properties.setProperty("db.name", databaseName);
         properties.setProperty("db.user", user);
         properties.setProperty("db.password", password != null ? password : "");
@@ -108,6 +142,20 @@ public class DatabaseConfig {
         try (FileOutputStream output = new FileOutputStream(file)) {
             properties.store(output, null);
         }
+    }
+
+    public boolean isEmbeddedH2() {
+        return url != null && url.toLowerCase().startsWith("jdbc:h2:");
+    }
+
+    public String getDatabaseFilePath() {
+        if (url != null && url.toLowerCase().startsWith(H2_PREFIX)) {
+            String remainder = url.substring(H2_PREFIX.length());
+            int semi = remainder.indexOf(';');
+            String base = semi >= 0 ? remainder.substring(0, semi) : remainder;
+            return base + ".mv.db";
+        }
+        return url != null ? url : "";
     }
 
     private static String sanitizeDatabaseName(String candidate) {

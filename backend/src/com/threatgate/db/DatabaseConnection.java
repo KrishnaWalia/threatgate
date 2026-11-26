@@ -1,6 +1,7 @@
 package com.threatgate.db;
 
 import com.threatgate.exception.DatabaseException;
+import java.io.File;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
@@ -31,7 +32,7 @@ public class DatabaseConnection {
             return DriverManager.getConnection(config.getServerUrl(), config.getUser(), config.getPassword());
         } catch (SQLException e) {
             this.lastError = e.getMessage();
-            throw new DatabaseException("Failed to connect to MySQL server: " + e.getMessage(), e);
+            throw new DatabaseException("Failed to connect to database server: " + e.getMessage(), e);
         }
     }
 
@@ -46,6 +47,17 @@ public class DatabaseConnection {
     }
 
     public void ensureDatabaseExists() throws DatabaseException {
+        if (config.isEmbeddedH2()) {
+            File dbFile = new File(config.getDatabaseFilePath());
+            File parent = dbFile.getParentFile();
+            if (parent != null && !parent.exists()) {
+                parent.mkdirs();
+            }
+            return;
+        }
+        if (config.getServerUrl() == null || config.getServerUrl().trim().isEmpty()) {
+            return;
+        }
         String safeDbName = config.getDatabaseName();
         String sql = "CREATE DATABASE IF NOT EXISTS `" + safeDbName
                 + "` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci";

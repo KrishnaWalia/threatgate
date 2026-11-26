@@ -7,15 +7,21 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 public class SchemaInitializer {
+    private static final List<String> TABLE_NAMES = List.of(
+            "orgs", "users", "rules", "attack_logs", "blocked_ips"
+    );
+
     private static final String CREATE_ORGS_SQL =
             "CREATE TABLE IF NOT EXISTS orgs ("
                     + "id INT AUTO_INCREMENT PRIMARY KEY, "
                     + "name VARCHAR(120) NOT NULL, "
-                    + "created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP"
-                    + ") ENGINE=InnoDB";
+                    + "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP"
+                    + ")";
 
     private static final String CREATE_USERS_SQL =
             "CREATE TABLE IF NOT EXISTS users ("
@@ -23,23 +29,23 @@ public class SchemaInitializer {
                     + "org_id INT NOT NULL, "
                     + "email VARCHAR(190) NOT NULL UNIQUE, "
                     + "password_hash VARCHAR(100) NOT NULL, "
-                    + "role ENUM('admin', 'viewer') NOT NULL DEFAULT 'viewer', "
-                    + "created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+                    + "role VARCHAR(20) NOT NULL DEFAULT 'viewer' CHECK (role IN ('admin', 'viewer')), "
+                    + "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, "
                     + "CONSTRAINT fk_users_org FOREIGN KEY (org_id) REFERENCES orgs(id) ON DELETE CASCADE"
-                    + ") ENGINE=InnoDB";
+                    + ")";
 
     private static final String CREATE_RULES_SQL =
             "CREATE TABLE IF NOT EXISTS rules ("
                     + "id INT AUTO_INCREMENT PRIMARY KEY, "
                     + "org_id INT NOT NULL, "
-                    + "category ENUM('sqli', 'xss', 'path_traversal', 'other') NOT NULL, "
+                    + "category VARCHAR(32) NOT NULL CHECK (category IN ('sqli', 'xss', 'path_traversal', 'other')), "
                     + "pattern TEXT NOT NULL, "
                     + "weight INT NOT NULL DEFAULT 10, "
                     + "is_active BOOLEAN NOT NULL DEFAULT TRUE, "
                     + "description VARCHAR(255), "
-                    + "created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+                    + "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, "
                     + "CONSTRAINT fk_rules_org FOREIGN KEY (org_id) REFERENCES orgs(id) ON DELETE CASCADE"
-                    + ") ENGINE=InnoDB";
+                    + ")";
 
     private static final String CREATE_ATTACK_LOGS_SQL =
             "CREATE TABLE IF NOT EXISTS attack_logs ("
@@ -48,17 +54,15 @@ public class SchemaInitializer {
                     + "ip_address VARCHAR(45) NOT NULL, "
                     + "method VARCHAR(10) NOT NULL, "
                     + "path VARCHAR(2048) NOT NULL, "
-                    + "category ENUM('sqli', 'xss', 'path_traversal', 'brute_force', 'none') NOT NULL, "
+                    + "category VARCHAR(32) NOT NULL CHECK (category IN ('sqli', 'xss', 'path_traversal', 'brute_force', 'none')), "
                     + "risk_score INT NOT NULL DEFAULT 0, "
-                    + "action ENUM('allowed', 'blocked') NOT NULL, "
+                    + "action VARCHAR(16) NOT NULL CHECK (action IN ('allowed', 'blocked')), "
                     + "matched_rule_id INT NULL, "
                     + "user_agent VARCHAR(512), "
-                    + "created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+                    + "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, "
                     + "CONSTRAINT fk_logs_org FOREIGN KEY (org_id) REFERENCES orgs(id) ON DELETE CASCADE, "
-                    + "CONSTRAINT fk_logs_rule FOREIGN KEY (matched_rule_id) REFERENCES rules(id) ON DELETE SET NULL, "
-                    + "INDEX idx_logs_org_created (org_id, created_at), "
-                    + "INDEX idx_logs_ip (ip_address)"
-                    + ") ENGINE=InnoDB";
+                    + "CONSTRAINT fk_logs_rule FOREIGN KEY (matched_rule_id) REFERENCES rules(id) ON DELETE SET NULL"
+                    + ")";
 
     private static final String CREATE_BLOCKED_IPS_SQL =
             "CREATE TABLE IF NOT EXISTS blocked_ips ("
@@ -66,11 +70,11 @@ public class SchemaInitializer {
                     + "org_id INT NOT NULL, "
                     + "ip_address VARCHAR(45) NOT NULL, "
                     + "reason VARCHAR(255), "
-                    + "blocked_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, "
-                    + "expires_at DATETIME NULL, "
+                    + "blocked_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+                    + "expires_at TIMESTAMP NULL, "
                     + "CONSTRAINT fk_blocked_org FOREIGN KEY (org_id) REFERENCES orgs(id) ON DELETE CASCADE, "
-                    + "UNIQUE KEY uniq_org_ip (org_id, ip_address)"
-                    + ") ENGINE=InnoDB";
+                    + "CONSTRAINT uniq_org_ip UNIQUE (org_id, ip_address)"
+                    + ")";
 
     private final DatabaseConnection databaseConnection;
 
@@ -87,6 +91,10 @@ public class SchemaInitializer {
             statement.executeUpdate(CREATE_RULES_SQL);
             statement.executeUpdate(CREATE_ATTACK_LOGS_SQL);
             statement.executeUpdate(CREATE_BLOCKED_IPS_SQL);
+            if (databaseConnection.getConfig().isEmbeddedH2()) {
+                statement.executeUpdate("CREATE INDEX IF NOT EXISTS idx_logs_org_created ON attack_logs (org_id, created_at)");
+                statement.executeUpdate("CREATE INDEX IF NOT EXISTS idx_logs_ip ON attack_logs (ip_address)");
+            }
         } catch (SQLException e) {
             throw new DatabaseException("Failed to initialize database schema: " + e.getMessage(), e);
         }
@@ -105,6 +113,21 @@ public class SchemaInitializer {
             return orgId;
         } catch (SQLException e) {
             throw new DatabaseException("Failed to seed database defaults: " + e.getMessage(), e);
+        }
+    }
+
+    public Map<String, Long> countAllTables() throws DatabaseException {
+        Map<String, Long> counts = new LinkedHashMap<>();
+        try (Connection connection = databaseConnection.getConnection();
+             Statement statement = connection.createStatement()) {
+            for (String table : TABLE_NAMES) {
+                try (ResultSet resultSet = statement.executeQuery("SELECT COUNT(*) FROM " + table)) {
+                    counts.put(table, resultSet.next() ? resultSet.getLong(1) : 0L);
+                }
+            }
+            return counts;
+        } catch (SQLException e) {
+            throw new DatabaseException("Failed to count database tables: " + e.getMessage(), e);
         }
     }
 

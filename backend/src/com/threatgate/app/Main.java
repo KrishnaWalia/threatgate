@@ -12,6 +12,7 @@ import com.threatgate.model.CategoryCount;
 import com.threatgate.model.DashboardStats;
 import com.threatgate.model.DetectionRule;
 import com.threatgate.model.InspectionRequest;
+import com.threatgate.model.Organization;
 import com.threatgate.model.TimelineBucket;
 import com.threatgate.model.User;
 import com.threatgate.service.FilePersistenceService;
@@ -22,6 +23,7 @@ import java.io.IOException;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.List;
+import java.util.Map;
 import java.util.Scanner;
 
 public final class Main {
@@ -88,7 +90,7 @@ public final class Main {
         System.out.println(LINE_THIN);
         System.out.println("  [1] Sign In");
         System.out.println("  [2] Register New Viewer Account");
-        System.out.println("  [3] Configure / Connect MySQL JDBC Database");
+        System.out.println("  [3] Configure Database (Local H2 DB File / Custom JDBC)");
         System.out.println("  [4] Exit");
         System.out.println(LINE_WIDE);
         System.out.print("  Select an option [1-4]: ");
@@ -98,7 +100,7 @@ public final class Main {
         switch (choice) {
             case 1 -> handleSignIn();
             case 2 -> handleRegister();
-            case 3 -> handleDatabaseReconnect();
+            case 3 -> handleDatabaseSwitchMenu();
             case 4 -> {
                 return false;
             }
@@ -608,28 +610,119 @@ public final class Main {
     }
 
     private void handleDatabaseMenu() {
-        System.out.println(LINE_THIN);
-        System.out.println("                               DATABASE / JDBC SETTINGS");
-        System.out.println(LINE_THIN);
+        System.out.println(LINE_WIDE);
+        System.out.println("                      DATABASE EXPLORER (EXTRACT & LIST SAVED DB TABLES)");
+        System.out.println(LINE_WIDE);
         DatabaseConfig cfg = facade.getDatabaseConfig();
-        System.out.println("  Driver       : " + cfg.getDriver());
+        System.out.println("  JDBC Driver  : " + cfg.getDriver());
         System.out.println("  JDBC URL     : " + cfg.getUrl());
-        System.out.println("  User         : " + cfg.getUser());
-        System.out.println("  Mode         : " + (facade.isDatabaseActive() ? "MYSQL JDBC ACTIVE" : "OFFLINE CSV FALLBACK"));
+        if (cfg.isEmbeddedH2()) {
+            File dbFile = new File(cfg.getDatabaseFilePath());
+            String sizeInfo = dbFile.exists() ? String.format(" (%d KB)", Math.max(1L, dbFile.length() / 1024L)) : " (new)";
+            System.out.println("  DB File      : " + dbFile.getAbsolutePath() + sizeInfo);
+        }
+        System.out.println("  Mode         : " + getStorageModeLabel());
         String lastErr = facade.getDatabaseConnection().getLastError();
         if (!lastErr.isEmpty()) {
             System.out.println("  Last DB Info : " + lastErr);
         }
-        System.out.println(LINE_THIN);
-        System.out.println("  [1] Reconnect / Configure MySQL Credentials");
-        System.out.println("  [2] Re-run Schema Initializer & Default Seed");
-        System.out.println("  [3] Save Offline CSV State Now");
-        System.out.print("  Select option [1-3]: ");
-        int sub = readMenuChoice(1, 3, 3);
 
-        switch (sub) {
-            case 1 -> handleDatabaseReconnect();
+        try {
+            printTableCountsSummary(facade.getDatabaseTableCounts());
+        } catch (DatabaseException e) {
+            System.err.println("  [DB ERROR] Could not query table counts: " + e.getMessage());
+        }
+
+        System.out.println(LINE_THIN);
+        System.out.println("  [1] Extract & List All Saved Tables Overview");
+        System.out.println("  [2] Extract & List 'orgs' Table from DB");
+        System.out.println("  [3] Extract & List 'users' Table from DB (Admin)");
+        System.out.println("  [4] Extract & List 'rules' Table from DB");
+        System.out.println("  [5] Extract & List 'attack_logs' Table from DB");
+        System.out.println("  [6] Extract & List 'blocked_ips' Table from DB (Admin)");
+        System.out.println("  [7] Export Entire Database to CSV Files (Admin)");
+        System.out.println("  [8] Switch Local H2 DB File or Custom JDBC Connection");
+        System.out.print("  Select option [1-8]: ");
+        int sub = readMenuChoice(1, 8, 1);
+
+        int orgId = currentUser.getOrgId();
+        try {
+            switch (sub) {
+                case 1 -> {
+                    System.out.println("\n  --- ORGS TABLE ---");
+                    printOrganizationTable(facade.extractAllOrganizations());
+                    if (currentUser.isAdmin()) {
+                        System.out.println("\n  --- USERS TABLE ---");
+                        printUserTable(facade.extractAllUsers(currentUser));
+                    }
+                    System.out.println("\n  --- RULES TABLE ---");
+                    printRuleTable(facade.extractAllRules(orgId));
+                    System.out.println("\n  --- ATTACK_LOGS TABLE ---");
+                    printLogTable(facade.extractAllAttackLogs(orgId));
+                    if (currentUser.isAdmin()) {
+                        System.out.println("\n  --- BLOCKED_IPS TABLE ---");
+                        printBlockedIpTable(facade.extractActiveBlockedIps(currentUser));
+                    }
+                }
+                case 2 -> printOrganizationTable(facade.extractAllOrganizations());
+                case 3 -> printUserTable(facade.extractAllUsers(currentUser));
+                case 4 -> printRuleTable(facade.extractAllRules(orgId));
+                case 5 -> printLogTable(facade.extractAllAttackLogs(orgId));
+                case 6 -> printBlockedIpTable(facade.extractActiveBlockedIps(currentUser));
+                case 7 -> {
+                    facade.exportEntireDatabaseToCsv(orgId, currentUser);
+                    System.out.println("  [SUCCESS] Extracted all DB tables to CSV files in " + facade.getDataDirectory());
+                }
+                case 8 -> handleDatabaseSwitchMenu();
+                default -> System.out.println("  [!] Unknown option.");
+            }
+        } catch (UnauthorizedRoleException e) {
+            System.err.println("\n  [ACCESS DENIED] " + e.getMessage());
+        } catch (DatabaseException | IOException e) {
+            System.err.println("\n  [ERROR] " + e.getMessage());
+        }
+    }
+
+    private void handleDatabaseSwitchMenu() {
+        System.out.println(LINE_THIN);
+        System.out.println("                         DATABASE SETUP (LOCAL H2 / CUSTOM JDBC)");
+        System.out.println(LINE_THIN);
+        System.out.println("  [1] Use / Switch Local Embedded H2 Database File (.mv.db)");
+        System.out.println("  [2] Connect External MySQL JDBC Server");
+        System.out.println("  [3] Re-run Schema Initializer & Default Seed");
+        System.out.print("  Select option [1-3]: ");
+        int choice = readMenuChoice(1, 3, 1);
+
+        switch (choice) {
+            case 1 -> {
+                String defaultPath = facade.getDataDirectory() + File.separator + "threatgate";
+                String filePath = readOptionalString("Local H2 DB base path [" + defaultPath + "]: ");
+                String saveAns = readOptionalString("Save setting to db.properties? (y/N): ");
+                boolean saveConfig = "y".equalsIgnoreCase(saveAns) || "yes".equalsIgnoreCase(saveAns);
+                try {
+                    facade.switchToEmbeddedDatabase(filePath, saveConfig);
+                    System.out.println("\n  [SUCCESS] Connected to Embedded H2 JDBC -> "
+                            + facade.getDatabaseConfig().getDatabaseFilePath());
+                } catch (DatabaseException e) {
+                    System.err.println("\n  [DB ERROR] " + e.getMessage());
+                }
+            }
             case 2 -> {
+                String host = readOptionalString("MySQL Host [localhost]: ");
+                int port = readInt("MySQL Port [3306]: ", 1, 65535);
+                String dbName = readOptionalString("Database Name [threatgate]: ");
+                String user = readOptionalString("MySQL User [root]: ");
+                String password = readOptionalString("MySQL Password (leave blank if empty): ");
+                String saveAns = readOptionalString("Save credentials to db.properties? (y/N): ");
+                boolean saveConfig = "y".equalsIgnoreCase(saveAns) || "yes".equalsIgnoreCase(saveAns);
+                try {
+                    facade.reconnectDatabase(host, port, dbName, user, password, saveConfig);
+                    System.out.println("\n  [SUCCESS] Connected to MySQL JDBC and initialized ThreatGate schema!");
+                } catch (DatabaseException e) {
+                    System.err.println("\n  [DB ERROR] " + e.getMessage());
+                }
+            }
+            case 3 -> {
                 try {
                     facade.reinitializeSchema();
                     System.out.println("  [SUCCESS] Schema initialized and verified for orgId=" + facade.getActiveOrgId());
@@ -637,36 +730,7 @@ public final class Main {
                     System.err.println("  [DB ERROR] " + e.getMessage());
                 }
             }
-            case 3 -> {
-                try {
-                    facade.saveOfflineState();
-                    System.out.println("  [SUCCESS] Saved offline CSV state into " + facade.getDataDirectory());
-                } catch (IOException e) {
-                    System.err.println("  [I/O ERROR] " + e.getMessage());
-                }
-            }
             default -> System.out.println("  [!] Unknown option.");
-        }
-    }
-
-    private void handleDatabaseReconnect() {
-        System.out.println(LINE_THIN);
-        System.out.println("                            MYSQL JDBC CONNECTION SETUP");
-        System.out.println(LINE_THIN);
-        String host = readOptionalString("MySQL Host [localhost]: ");
-        int port = readInt("MySQL Port [3306]: ", 1, 65535);
-        String dbName = readOptionalString("Database Name [threatgate]: ");
-        String user = readOptionalString("MySQL User [root]: ");
-        String password = readOptionalString("MySQL Password (leave blank if empty): ");
-        String saveAns = readOptionalString("Save credentials to db.properties? (y/N): ");
-        boolean saveConfig = "y".equalsIgnoreCase(saveAns) || "yes".equalsIgnoreCase(saveAns);
-
-        try {
-            facade.reconnectDatabase(host, port, dbName, user, password, saveConfig);
-            System.out.println("\n  [SUCCESS] Connected to MySQL JDBC and initialized ThreatGate schema!");
-        } catch (DatabaseException e) {
-            System.err.println("\n  [DB ERROR] " + e.getMessage());
-            System.out.println("  Continuing in Offline CSV Fallback Mode.");
         }
     }
 
@@ -678,11 +742,20 @@ public final class Main {
     }
 
     private void printStorageBanner() {
-        if (facade.isDatabaseActive()) {
-            System.out.println("  [Storage] MySQL JDBC CONNECTED -> " + facade.getDatabaseConfig().getUrl());
+        if (facade.isDatabaseActive() && facade.getDatabaseConfig().isEmbeddedH2()) {
+            System.out.println("  [Database] Embedded H2 JDBC ACTIVE -> " + facade.getDatabaseConfig().getDatabaseFilePath());
+        } else if (facade.isDatabaseActive()) {
+            System.out.println("  [Database] JDBC CONNECTED -> " + facade.getDatabaseConfig().getUrl());
         } else {
-            System.out.println("  [Storage] Offline CSV Fallback Mode active -> " + facade.getDataDirectory());
+            System.out.println("  [Storage] Offline CSV Fallback Mode -> " + facade.getDataDirectory());
         }
+    }
+
+    private String getStorageModeLabel() {
+        if (facade.isDatabaseActive() && facade.getDatabaseConfig().isEmbeddedH2()) {
+            return "EMBEDDED-H2-JDBC";
+        }
+        return facade.isDatabaseActive() ? "EXTERNAL-JDBC" : "OFFLINE-CSV";
     }
 
     private void printMainMenu() {
@@ -690,7 +763,7 @@ public final class Main {
         System.out.printf("  THREATGATE CONSOLE | User: %s [%s] | Mode: %s | Sim: %s%n",
                 currentUser.getEmail(),
                 currentUser.getRole().toUpperCase(),
-                facade.isDatabaseActive() ? "MYSQL-JDBC" : "OFFLINE-CSV",
+                getStorageModeLabel(),
                 facade.getTrafficPipelineService().isSimulationRunning() ? "RUNNING" : "IDLE");
         System.out.println(LINE_WIDE);
         System.out.println("  [1]  Dashboard Overview (Stat Cards, 24h Category Chart, 1h Timeline)");
@@ -701,7 +774,7 @@ public final class Main {
         System.out.println("  [6]  Blocked IPs Management (Admin Only)");
         System.out.println("  [7]  Multithreaded Simulator, Thread Lifecycle & Benchmark");
         System.out.println("  [8]  File I/O Tools (CSV, Byte Streams & StreamTokenizer)");
-        System.out.println("  [9]  Database / JDBC Connection Settings");
+        System.out.println("  [9]  Database Explorer (Extract & List Saved DB Tables / Settings)");
         System.out.println("  [10] Sign Out");
         System.out.println("  [11] Save & Exit");
         System.out.println(LINE_WIDE);
@@ -712,6 +785,58 @@ public final class Main {
         System.out.println(LINE_WIDE);
         System.out.println("                     ThreatGate CLI safely shut down. All state persisted.");
         System.out.println(LINE_WIDE);
+    }
+
+    private void printTableCountsSummary(Map<String, Long> counts) {
+        System.out.println("  +----------------+------------+");
+        System.out.println("  | SAVED TABLE    | ROW COUNT  |");
+        System.out.println("  +----------------+------------+");
+        for (Map.Entry<String, Long> entry : counts.entrySet()) {
+            System.out.printf("  | %-14s | %-10d |%n", entry.getKey(), entry.getValue());
+        }
+        System.out.println("  +----------------+------------+");
+    }
+
+    private void printOrganizationTable(List<Organization> organizations) {
+        if (organizations.isEmpty()) {
+            System.out.println("  No organizations stored.");
+            return;
+        }
+        SimpleDateFormat dtFormat = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+        System.out.println("  +----+--------------------------+---------------------+");
+        System.out.println("  | ID | ORGANIZATION NAME        | CREATED AT          |");
+        System.out.println("  +----+--------------------------+---------------------+");
+        for (Organization org : organizations) {
+            String createdStr = org.getCreatedAt() != null
+                    ? dtFormat.format(new Date(org.getCreatedAt().getTime()))
+                    : "-";
+            System.out.printf("  | %-2d | %-24s | %-19s |%n",
+                    org.getId(), truncate(org.getName(), 24), createdStr);
+        }
+        System.out.println("  +----+--------------------------+---------------------+");
+    }
+
+    private void printUserTable(List<User> users) {
+        if (users.isEmpty()) {
+            System.out.println("  No users stored.");
+            return;
+        }
+        SimpleDateFormat dtFormat = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+        System.out.println("  +----+--------+----------------------------------+--------+---------------------+");
+        System.out.println("  | ID | ORG ID | EMAIL                            | ROLE   | CREATED AT          |");
+        System.out.println("  +----+--------+----------------------------------+--------+---------------------+");
+        for (User user : users) {
+            String createdStr = user.getCreatedAt() != null
+                    ? dtFormat.format(new Date(user.getCreatedAt().getTime()))
+                    : "-";
+            System.out.printf("  | %-2d | %-6d | %-32s | %-6s | %-19s |%n",
+                    user.getId(),
+                    user.getOrgId(),
+                    truncate(user.getEmail(), 32),
+                    user.getRole().toUpperCase(),
+                    createdStr);
+        }
+        System.out.println("  +----+--------+----------------------------------+--------+---------------------+");
     }
 
     private void printLogTable(List<AttackLog> logs) {
